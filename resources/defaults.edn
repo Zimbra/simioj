@@ -1,0 +1,56 @@
+{;;; Local node configuration
+ {:node {;; each node should have a unique identifier
+         :id :n0
+         ;; human-friendly name for the node
+         :name "node0"
+         ;; Inter-node communications
+         :endpoint {;; HTTP address:port to bind to
+                    :http "0.0.0.0:2283"}
+         ;; Default location for configuration
+         :config-dir "/opt/zimbra/batf/conf"
+         ;; Default location for logs
+         :log-dir "/opt/zimbra/batf/log"
+         ;; Default location for replicated log/cache data
+         :data-dir "/opt/zimbra/batf/data"
+         ;; Jetty configuration
+         :worker {:count 4 :threads 4}
+         ;; This location is added to the classpath and should contain
+         ;; additional event-handling functions, as required.
+         ;; TODO - should this also contain new state-machines?
+         :classpath ["/opt/zimbra/batf/handlers"]
+         }}
+;;; Configure the method the system will use to "discover" all of the
+;;; nodes in the cluster
+ {:discovery {;; :unicast, :multicast, :disabled (for single node clusters)
+              :method :disabled
+              ;; Used if :discover-method is :unicast
+              ;; list of ip-address port-number pairs (as many as you like)
+              :initial-nodes ["127.0.0.1:2283"]
+              ;; This is the number of nodes that should be in the cluster.
+              ;; Discovery will not complete until there is a quorum.
+              ;; Quorum is defined as (inc (bit-shift-right expected-nodes 1))
+              :expected-nodes 1
+              ;; The cluster raft will not be started until
+              ;; (1) we have discovered expected-nodes, or
+              ;; (2) we have quorum and quorum-timeout seconds have elapsed
+              :quorum-timeout 30}}
+ ;;; Configuration for the cluster-wide Raft that is responsible
+ ;;; for reliable replication of shard allocation and node topology
+ {:cluster-raft {;; Raft log implementation (:sqlite, :memory)
+                 :log :sqlite
+                 ;; Additional statemachines to be configured
+                 ;; for the :cluster-raft.
+                 ;; keys should be a keyword to use for an identifier
+                 ;; values should be fully-qualified classes
+                 :statemachines {}
+                 }}
+ ;;; Configuration for the shard "micro" rafts that are responsible
+ ;;; for replication of metadata and events
+ {:shard-raft {;; Raft loc implementation (:sqlite, :memory)
+               :log :sqlite
+               ;; Additional statemachines to be configured
+               ;; for the :shard-rafts.
+               ;; keys should be a keyword to use for an identifier
+               ;; values should be fully-qualified classes
+               :statemachines {}
+               }}}

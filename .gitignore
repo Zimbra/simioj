@@ -1,0 +1,15 @@
+*#
+*.class
+*.jar
+.#*
+.DS_Store
+.hg/
+.hgignore
+/.lein-*
+/.nrepl-port
+/checkouts
+/classes
+/target
+/test-data
+pom.xml
+pom.xml.asc
