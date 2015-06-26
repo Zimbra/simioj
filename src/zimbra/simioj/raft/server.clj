@@ -42,10 +42,8 @@
                      ^Boolean done])      ; true if this is the last chunk
 
 
-
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Servers
+;;;; Server, Election Protocol
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def server-states
@@ -75,6 +73,9 @@
     election and needs to transition to :leader state."))
 
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Server, Raft Protocol
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 (defprotocol RaftProtocol
@@ -191,128 +192,8 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Test Implementation
+;;;; Server Implementation
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-
-;;; The server-map here has the following structure:
-;;;   key = <server-identifier>
-;;;   value = <server-instance>
-;;; NOTE: It should be wrapped in a ref!
-;;; It is intended for use in testing
-(deftype TestRpc [server-map]
-  RaftProtocol
-  (append-entries [this server-ids entries]
-    (apply merge (pmap (fn [s] {s (append-entries (@server-map s) entries)}) server-ids)))
-  (request-vote [this server-ids vote]
-    (apply merge (pmap (fn [s] {s (request-vote (@server-map s) vote)}) server-ids)))
-  (install-snapshot [this server-ids snapshot]
-    (apply merge (pmap (fn [s] {s (install-snapshot (@server-map s) snapshot)}) server-ids))))
-
-;;; log must be a vectory wrapped in a ref
-;;; see make-memory-log
-(deftype MemoryLog [log]
-  Log
-  (first-id-term [this]
-    (let [entry (first @log)]
-      (if entry
-        [(:id entry) (:term entry)]
-        [0 0])))
-  (last-id-term [this]
-    (let [ll (count @log)
-          entry (when (pos? ll) (nth @log (dec ll)))]
-      (if entry
-        [(:id entry) (:term entry)]
-       [0 0])))
-  (post-cmd! [this term rid command]
-    (let [[lid lterm] (last-id-term this)
-          nid (inc lid)
-          entry {:id nid :term term :rid rid :command command}
-          nidx (count @log)]
-      (when (not-empty (filter #(= (:rid %) rid) @log))
-        (throw (IllegalArgumentException.
-                (format "another entry with request id %s already in log" rid))))
-      (dosync
-       (alter log #(assoc % nidx entry)))
-      nid))
-  (put-cmd! [this id term rid command]
-    (let [[lid lterm] (last-id-term this)
-          entry {:id id :term term :rid rid :command command}
-          nidx (count @log)]
-      ;; (logger/debugf "put-cmd!: id=%s, term=%s, rid=%s, lid=%s, lterm=%d, nidx=%s"
-      ;;             id term rid lid lterm nidx)
-      (if (= lid (dec id))
-        (dosync
-         (alter log #(assoc % nidx entry))
-         true)
-        false)))
-  (get-entry [this id]
-    (let [[fid fterm] (first-id-term this)
-          i (- id fid)
-          clog (count @log)]
-      ;; (logger/debugf "get-entry: id=%s, fid=%s, fterm=%s, i=%s, #log=%s"
-      ;;             id fid fterm i clog)
-      (when (and (not (neg? i)) (< i clog))
-        (nth @log i))))
-  (ltrim-log! [this last-id]
-    (let [[fid fterm] (first-id-term this)
-          ilast (- last-id fid)]
-      (if (and (>= ilast 0)
-               (< ilast (count @log)))
-        (dosync
-         (alter log #(subvec % (inc ilast)))
-         true)
-        false)))
-  (rtrim-log! [this first-id]
-    (let [[fid fterm] (first-id-term this)
-          ilast+1 (- first-id fid)]
-      (if (and (>= ilast+1 0)
-               (< ilast+1 (count @log)))
-        (dosync
-         (alter log #(subvec % 0 ilast+1))
-         true)
-        false))))
-
-
-(defn- persist-if-changed [location vref expr]
-  (let [ref-val (deref vref)
-        rvalue (expr)]
-    (when-not (= ref-val (deref vref))
-      (logger/debugf "Value was changed.. Persisting %s to %s" @vref location)
-      (util/persist-obj location (deref vref)))
-    rvalue))
-
-
-(deftype PersistentMemoryLog [location mlog]
-  Log
-  (first-id-term [this]
-    (first-id-term mlog))
-  (last-id-term [this]
-    (last-id-term mlog))
-  (post-cmd! [this term rid command]
-    (persist-if-changed location (.log mlog) #(post-cmd! mlog term rid command)))
-  (put-cmd! [this id term rid command]
-    (persist-if-changed location (.log mlog) #(put-cmd! mlog id term rid command)))
-  (get-entry [this id]
-    (get-entry mlog id))
-  (ltrim-log! [this last-id]
-    (persist-if-changed location (.log mlog) #(ltrim-log! mlog last-id)))
-  (rtrim-log! [this first-id]
-    (persist-if-changed location (.log mlog) #(rtrim-log! mlog first-id))))
-
-
-
-(defn make-memory-log
-  "Create a MemoryLog instance.  This is for testing purposes."
-  ([] (make-memory-log []))
-  ([log] (->MemoryLog (ref log))))
-
-(defn make-persistent-log
-  "Create a PersistentMemoryLog instance."
-  ([location & {:keys [data] :or {data []}}]
-   (->PersistentMemoryLog location (make-memory-log (util/load-obj-if-present
-                                                     location :default-val data)))))
-
 
 
 (defn- system-time-ms
@@ -326,8 +207,8 @@
   (str (java.util.UUID/randomUUID)))
 
 
-(defn- br-get-state-machine
-  "Helper function for BasicRaft that will return the requested
+(defn- rs-get-state-machine
+  "Helper function for RaftServer that will return the requested
   state machine (by MACHINE identifier)."
   [machine servers-config server-state]
   (let [{:keys [:state :voted-for]} @server-state
@@ -338,7 +219,7 @@
       :else [{:status :ok :server voted-for} (first sm)])))
 
 
-(defn- br-broadcast-timeout-ms
+(defn- rs-broadcast-timeout-ms
   "Extracts and returns the leader broadcast timeout (in ms) from
   the :broadcast-timeout in ELECTION-CONFIG.  If not present,
   supplies a default value of 15 ms."
@@ -346,14 +227,14 @@
   broadcast-timeout)
 
 
-(defn- br-election-timeout-ms
+(defn- rs-election-timeout-ms
   "Computes a random election timeout between the minimum
   and maximum configuration settings."
   [{:keys [:election-timeout-min :election-timeout-max]}]
   (+ (rand-int (- election-timeout-max election-timeout-min)) election-timeout-min))
 
 
-(defn- br-start-timers!
+(defn- rs-start-timers!
   "Start all state-specific timer(s).
   Mutates: The timers ref.
   "
@@ -362,34 +243,34 @@
   (let [state (:state @server-state)]
     (condp = state
       :follower (let [follower-timer (future (Thread/sleep
-                                              (br-election-timeout-ms @election-config))
+                                              (rs-election-timeout-ms @election-config))
                                              (candidate! this))]
                   (dosync
                    (ref-set timers {:follower follower-timer})))
       :candidate (let [candidate-timer (future (Thread/sleep
-                                                (br-election-timeout-ms @election-config))
+                                                (rs-election-timeout-ms @election-config))
                                                (candidate! this))]
                    (dosync (ref-set timers {:candidate candidate-timer})))
       :leader (let [leader-timer (future (Thread/sleep
-                                          (br-broadcast-timeout-ms @election-config))
+                                          (rs-broadcast-timeout-ms @election-config))
                                          (leader! this))]
                 (dosync (ref-set timers {:leader leader-timer})))
       nil)))
 
-(defn- br-cancel-timers!
+(defn- rs-cancel-timers!
   "Cancel all timer(s)."
   ([{:keys [:timers]}]
    (try
      (dorun (map future-cancel (vals @timers)))
-     (catch Exception e (logger/debugf "br-cancel-timers!: error=%s" (.getMessage e)))))
+     (catch Exception e (logger/debugf "rs-cancel-timers!: error=%s" (.getMessage e)))))
   ([{:keys [:timers]} timer]
    (try
      (dorun (map future-cancel (map second (filter #(= (first %) timer) @timers))))
-     (catch Exception e (logger/debugf "br-cancel-timers!: timer=%s, error=%s" timer (.getMessage e))))))
+     (catch Exception e (logger/debugf "rs-cancel-timers!: timer=%s, error=%s" timer (.getMessage e))))))
 
 
 
-(defn- br-candidate!
+(defn- rs-candidate!
   "Possibly switch to :candidate mode.  This function handles two cases:
   1. We are using normal Raft election protocol
   2. We are using configured leader protocol.
@@ -404,7 +285,7 @@
   "
   [{:keys [:election-config :id :leader-state :log :rpc :server-state :servers-config :timers]
     :as this}]
-  (logger/debugf "br-candidate! id=%s, server-state=%s"
+  (logger/debugf "rs-candidate! id=%s, server-state=%s"
                  id @server-state)
   (let [leader (:leader @servers-config)
         voted-for (:voted-for @server-state)
@@ -426,7 +307,7 @@
               num-success (count (filter :vote-granted (vals resp)))
               max-term (apply max (map :term (vals resp)))]
           (logger/debugf (str
-                          "br-candidate! id=%s, new-term=%s, "
+                          "rs-candidate! id=%s, new-term=%s, "
                           "lid=%s, lterm=%s, resp=%s")
                          id new-term lid lterm resp)
 
@@ -438,9 +319,9 @@
               (leader! this new-term))))
       (follower! this))))
 
-(defn- br-follower!
+(defn- rs-follower!
   "Implementation of the Election protocol follower! function
-  for a BasicRaft"
+  for a RaftServer"
   [{:keys [:election-config :id :timers :server-state]
     :as this}]
   (cancel-timers! this)
@@ -449,7 +330,7 @@
   (start-timers! this))
 
 
-(defn- br-leader!
+(defn- rs-leader!
     "The arity/1 function trigers the leader to broadcast an
      empty append-entries RPC to all of its follows if normal
      Raft election is being used.  If configured Raft election is
@@ -481,25 +362,25 @@
 
 
 
-(def br-basicraft-election
+(def rs-basicraft-election
   "Mapping of Election protocol implementation functions
-  for a BasicRaft."
-  {:cancel-timers! br-cancel-timers!
-   :candidate! br-candidate!
-   :follower! br-follower!
-   :leader! br-leader!
-   :start-timers! br-start-timers!})
+  for a RaftServer."
+  {:cancel-timers! rs-cancel-timers!
+   :candidate! rs-candidate!
+   :follower! rs-follower!
+   :leader! rs-leader!
+   :start-timers! rs-start-timers!})
 
 
 ;;; TODO - refactor to shorten
-(defn- br-append-entries
-  "Implementation of Raft append-entries for a Basic Raft"
+(defn- rs-append-entries
+  "Implementation of Raft append-entries for a RaftServer"
   [{:keys [:id :log :server-state :servers-config]
     :as this}
    {:keys [:term :leader-id
            :prev-log-index :prev-log-term
            :entries :leader-commit]}]
-  (logger/debugf (str "br-append-entries-1: id=%s, term=%s, leader-id=%s, "
+  (logger/debugf (str "rs-append-entries-1: id=%s, term=%s, leader-id=%s, "
                       "prev-log-index=%s, prev-log-term=%s, "
                       "entries=%s, leader-commit=%s")
                  id term leader-id prev-log-index prev-log-term
@@ -516,7 +397,7 @@
                                                      (when-not (= term sterm) (inc i))))
                                            (range sidx 0 -1))
                                      sidx))]
-    (logger/debugf (str "br-append-entries-2: id=%s servers-config=%s, "
+    (logger/debugf (str "rs-append-entries-2: id=%s servers-config=%s, "
                         "server-state=%s, current-term=%s, "
                         "commit-index=%s, pentry=%s, eentry=%s, "
                         "lid=%s, lterm=%s")
@@ -549,7 +430,7 @@
                                :commit-index new-commit-index))
                 (when (not= (:state @server-state) :follower)
                   (follower! this))
-                (logger/debugf "br-append-entries-3: id=%s, server-state=%s"
+                (logger/debugf "rs-append-entries-3: id=%s, server-state=%s"
                                id @server-state)
                 (dorun
                  (pmap (fn [s]
@@ -560,7 +441,7 @@
                  :conflicting-first-idx nil})))))
 
 
-(defn- br-command!
+(defn- rs-command!
   "Send a command to the leader of the state machine.  If COMMAND is nil,
   the system will issue an 'empty' command, like what the leader does when
   it broadcasts heartbeats. This does not get stored in the log."
@@ -609,12 +490,12 @@
       :else {:status :moved :server voted-for})))
 
 
-(defn- br-get-machine-state
+(defn- rs-get-machine-state
   "Implementation of Raft protocol get-machine-state function for
-  a BasicRaft"
+  a RaftServer"
   ([{:keys [:server-state :servers-config]}
     machine]
-   (let [[resp sm] (br-get-state-machine machine
+   (let [[resp sm] (rs-get-state-machine machine
                                          servers-config
                                          server-state)]
      (if (= (:status resp) :ok)
@@ -623,7 +504,7 @@
   ([this machine resource-id]
    (get-machine-state this machine resource-id nil))
   ([{:keys [:server-state :servers-config]} machine resource-id default]
-   (let [[resp sm] (br-get-state-machine machine
+   (let [[resp sm] (rs-get-state-machine machine
                                          servers-config
                                          server-state)]
      (if (= (:status resp) :ok)
@@ -631,9 +512,9 @@
        resp))))
 
 
-(defn- br-install-snapshot
+(defn- rs-install-snapshot
   "TODO - Implementation of the Raft protocol install-snapshot
-  function for a BasicRaft."
+  function for a RaftServer."
   [{:keys [:id :log :rpc :election-config :timers
            :servers-config :server-state :leader-state]
     :as this}
@@ -641,7 +522,7 @@
   (throw (Exception. "TODO - Implement install-snapshot")))
 
 
-(defn- br-request-vote
+(defn- rs-request-vote
   "Process a request to grant leadership to a new server.  This method handles both
   a traditional Raft election mechanism and a configured-leader election.
   "
@@ -655,7 +536,7 @@
         [lid lterm] (last-id-term log)
         leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)]
     (logger/debugf (str
-                    "br-request-vote: id=%s, term=%s, candidate-id=%s, "
+                    "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
                     "last-log-index=%s, last-log-term=%s, current-term=%s, "
                     "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
                     "leader=%s, leader-cmd-time-elapsed=%s")
@@ -676,17 +557,17 @@
       {:term current-term :vote-granted false})))
 
 
-(def br-basicraft-raftprotocol
-  "Mapping of Raft protocol functions for a BasicRaft"
-  {:append-entries br-append-entries
-   :command! br-command!
-   :get-machine-state br-get-machine-state
-   :install-snapshot br-install-snapshot
-   :request-vote br-request-vote
+(def rs-basicraft-raftprotocol
+  "Mapping of Raft protocol functions for a RaftServer"
+  {:append-entries rs-append-entries
+   :command! rs-command!
+   :get-machine-state rs-get-machine-state
+   :install-snapshot rs-install-snapshot
+   :request-vote rs-request-vote
    })
 
 
-;;; Basic Raft Implementation
+;;; Raft Server Implementation
 ;;;
 ;;; id - the ID of this server [static]
 ;;; log - a Log implementation [static]
@@ -745,28 +626,28 @@
 ;;;   match-index is the index of the highest log entry known to be
 ;;;     replicated to that server.
 
-(defrecord BasicRaft [id                ; server-id
-                      log               ; Log instance
-                      rpc               ; RPC instance
-                      election-config   ; map
-                      timers            ; map (ref)
-                      servers-config    ; map (ref)
-                      server-state      ; map (ref)
-                      leader-state])    ; map (ref)
+(defrecord RaftServer [id                ; server-id
+                       log               ; Log instance
+                       rpc               ; RPC instance
+                       election-config   ; map
+                       timers            ; map (ref)
+                       servers-config    ; map (ref)
+                       server-state      ; map (ref)
+                       leader-state])    ; map (ref)
 
 
-(extend BasicRaft
+(extend RaftServer
   Election
-  br-basicraft-election
+  rs-basicraft-election
   RaftProtocol
-  br-basicraft-raftprotocol
+  rs-basicraft-raftprotocol
   )
 
-(actor-wrapper BasicRaftActor [Election RaftProtocol] defrecord)
+(actor-wrapper RaftServerActor [Election RaftProtocol] defrecord)
 
 
-(defn make-basic-raft
-  "Constructs a BasicRaft instance that has been actor-fied.
+(defn make-raft-server
+  "Constructs a RaftServer instance that has been actor-fied.
    Parameters:
      id - the server id
      log - a Log instance
@@ -777,20 +658,20 @@
        :election-timeout-max - maximum time in ms for election timeout
   "
   [id log rpc election-config servers-config server-state leader-state]
-  (->BasicRaftActor (chan) (BasicRaft.
-                            id
-                            log
-                            rpc
-                            election-config
-                            (ref {})
-                            (ref servers-config)
-                            (ref server-state)
-                            (ref leader-state))))
+  (->RaftServerActor (chan) (RaftServer.
+                             id
+                             log
+                             rpc
+                             election-config
+                             (ref {})
+                             (ref servers-config)
+                             (ref server-state)
+                             (ref leader-state))))
 
 
-(defmulti make-raft
-  (fn [cfg rpc] (:cluster-raft (:local cfg)))
-  :default :memory)
+;; (defmulti make-raft
+;;   (fn [cfg rpc] (:cluster-raft (:local cfg)))
+;;   :default :memory)
 
 ;; (defmethod make-raft :memory [{:keys [:local] :as cfg} rpc]
 ;;   (let [id (config/local-node-id cfg)
