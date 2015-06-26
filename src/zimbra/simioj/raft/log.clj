@@ -1,10 +1,12 @@
 (ns zimbra.simioj.raft.log
   (:require [clojure.java.io :as io]
+            [clojure.tools.logging :as logger]
+            [zimbra.simioj.util :as util]
             [clojure.java.jdbc :as j])
   (:gen-class))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Log
+;;;; Log Protocol
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
@@ -65,9 +67,126 @@
      Returns: true if an entry with id = FIRST-ID existed, else
               false"))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Raft MemoryLog - Test Implementation (memory only, no persistence)
+;;;; Not for use in production.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; log must be a vector wrapped in a ref
+;;; see make-memory-log
+(deftype MemoryLog [log]
+  Log
+  (first-id-term [this]
+    (let [entry (first @log)]
+      (if entry
+        [(:id entry) (:term entry)]
+        [0 0])))
+  (last-id-term [this]
+    (let [ll (count @log)
+          entry (when (pos? ll) (nth @log (dec ll)))]
+      (if entry
+        [(:id entry) (:term entry)]
+       [0 0])))
+  (post-cmd! [this term rid command]
+    (let [[lid lterm] (last-id-term this)
+          nid (inc lid)
+          entry {:id nid :term term :rid rid :command command}
+          nidx (count @log)]
+      (when (not-empty (filter #(= (:rid %) rid) @log))
+        (throw (IllegalArgumentException.
+                (format "another entry with request id %s already in log" rid))))
+      (dosync
+       (alter log #(assoc % nidx entry)))
+      nid))
+  (put-cmd! [this id term rid command]
+    (let [[lid lterm] (last-id-term this)
+          entry {:id id :term term :rid rid :command command}
+          nidx (count @log)]
+      ;; (logger/debugf "put-cmd!: id=%s, term=%s, rid=%s, lid=%s, lterm=%d, nidx=%s"
+      ;;             id term rid lid lterm nidx)
+      (if (= lid (dec id))
+        (dosync
+         (alter log #(assoc % nidx entry))
+         true)
+        false)))
+  (get-entry [this id]
+    (let [[fid fterm] (first-id-term this)
+          i (- id fid)
+          clog (count @log)]
+      ;; (logger/debugf "get-entry: id=%s, fid=%s, fterm=%s, i=%s, #log=%s"
+      ;;             id fid fterm i clog)
+      (when (and (not (neg? i)) (< i clog))
+        (nth @log i))))
+  (ltrim-log! [this last-id]
+    (let [[fid fterm] (first-id-term this)
+          ilast (- last-id fid)]
+      (if (and (>= ilast 0)
+               (< ilast (count @log)))
+        (dosync
+         (alter log #(subvec % (inc ilast)))
+         true)
+        false)))
+  (rtrim-log! [this first-id]
+    (let [[fid fterm] (first-id-term this)
+          ilast+1 (- first-id fid)]
+      (if (and (>= ilast+1 0)
+               (< ilast+1 (count @log)))
+        (dosync
+         (alter log #(subvec % 0 ilast+1))
+         true)
+        false))))
+
+(defn make-memory-log
+  "Create a MemoryLog instance.  This is for testing purposes."
+  ([] (make-memory-log []))
+  ([log] (->MemoryLog (ref log))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Raft PersistentMemoryLog - Test Implementation (memory only,
+;;;; but will persist)
+;;;; Non-performant. Not for use in production.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defn- persist-if-changed [location vref expr]
+  (let [ref-val (deref vref)
+        rvalue (expr)]
+    (when-not (= ref-val (deref vref))
+      (logger/debugf "Value was changed.. Persisting %s to %s" @vref location)
+      (util/persist-obj location (deref vref)))
+    rvalue))
+
+
+(deftype PersistentMemoryLog [location mlog]
+  Log
+  (first-id-term [this]
+    (first-id-term mlog))
+  (last-id-term [this]
+    (last-id-term mlog))
+  (post-cmd! [this term rid command]
+    (persist-if-changed location (.log mlog) #(post-cmd! mlog term rid command)))
+  (put-cmd! [this id term rid command]
+    (persist-if-changed location (.log mlog) #(put-cmd! mlog id term rid command)))
+  (get-entry [this id]
+    (get-entry mlog id))
+  (ltrim-log! [this last-id]
+    (persist-if-changed location (.log mlog) #(ltrim-log! mlog last-id)))
+  (rtrim-log! [this first-id]
+    (persist-if-changed location (.log mlog) #(rtrim-log! mlog first-id))))
+
+
+
+(defn make-persistent-log
+  "Create a PersistentMemoryLog instance."
+  ([location & {:keys [data] :or {data []}}]
+   (->PersistentMemoryLog location (make-memory-log (util/load-obj-if-present
+                                                     location :default-val data)))))
+
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Log Implementations
+;;;; SQLiteLog Implementation
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (deftype SQLiteLog [db table]
   Log
