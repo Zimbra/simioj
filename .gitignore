@@ -9,6 +9,7 @@
 /.nrepl-port
 /checkouts
 /classes
+/log
 /target
 /test-data
 pom.xml
