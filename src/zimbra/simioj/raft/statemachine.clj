@@ -48,6 +48,7 @@
      object patches may choose to return the original state of the object
      (before appling a patch) as old-state and the new state of the object
      (after applying the patch) as the new-state.
+     Returns the current state as of the time this function is called.
      ")
   (remove-state-change-listener [this listener]
     "Deregister the specified LISTENER function.  Returns a non-nil value
@@ -62,6 +63,7 @@
 (defmulti msm-process-log-command!
   "Used by MemoryStateMachine instance to process log commands
    Parameters:
+     my-cmd - the command my instance is interested ing
      idx - the log index
      cmd-key - the command to be processed; e.g., :noop, :set-config, :patch
      cmd-val - the value associated with the command
@@ -69,41 +71,44 @@
      cache - Any state-machine-specific cache (ref)
    Returns: {:applied? <bool> :state-changed? <bool> :old-state <map> :new-state <map>}
   "
-  (fn [idx cmd-key cmd-val commit-index cache] cmd-key)
+  (fn [my-cmd idx cmd-key cmd-val commit-index cache] my-cmd)
   :default :noop)
 
 
 (defmethod msm-process-log-command! :patch
-  [idx cmd-key cmd-val commit-index cache]
+  [my-cmd idx cmd-key cmd-val commit-index cache]
   (if (<= idx commit-index)
-    (let [{:keys [:oid :ops :upsert]} cmd-val
-          res-old (@cache oid)
-          res-new (or (reduce (fn [r f] (f r)) (or res-old upsert) ops) res-old)]
-      (if (not= res-old res-new)
-        (do
-          (dosync (alter cache assoc oid res-new))
-          {:applied? true
-           :state-changed? true
-           :old-state {:oid oid :val res-old}
-           :new-state {:oid oid :val res-new}})
-        {:applied? true :state-changed? false}))
+    (if (= my-cmd cmd-key)
+      (let [{:keys [:oid :ops :upsert]} cmd-val
+            res-old (@cache oid)
+            res-new (or (reduce (fn [r f] (f r)) (or res-old upsert) ops) res-old)]
+        (if (not= res-old res-new)
+          (do
+            (dosync (alter cache assoc oid res-new))
+            {:applied? true
+             :state-changed? true
+             :old-state {:oid oid :val res-old}
+             :new-state {:oid oid :val res-new}})
+          {:applied? true :state-changed? false}))
+      {:applied? true :state-changed? false})
     {:applied? false :state-changed? false}))
-
 
 (defmethod msm-process-log-command! :set-config
   ;; config changes are always applied, whether or not
   ;; the command has been committed
-  [idx cmd-key cmd-val commit-index cache]
-  (let [old-state @cache
-        new-state (dosync (alter cache merge cmd-val))]
-    {:applied? true
-     :state-changed? (not= old-state new-state)
-     :old-state old-state
-     :new-state new-state}))
+  [my-cmd idx cmd-key cmd-val commit-index cache]
+  (if (= my-cmd cmd-key)
+    (let [old-state @cache
+          new-state (dosync (alter cache merge cmd-val))]
+      {:applied? true
+       :state-changed? (not= old-state new-state)
+       :old-state old-state
+       :new-state new-state})
+    {:applied? true :state-changed? false}))
 
 
 (defmethod msm-process-log-command! :noop
-  [idx cmd-key cmd-val commit-index cache]
+  [my-cmd idx cmd-key cmd-val commit-index cache]
   (if (<= idx commit-index)
     {:applied? true :state-changed? false}
     {:applied? false :state-changed? false}))
@@ -124,9 +129,8 @@
                 entry (get-entry log i)]
             (when entry  ; safety check
               (let [[cmd-key cmd-val] (:command entry)
-                    {:keys [:applied? :state-changed? :old-state :new-state]} (if (= cmd-key cmd)
-                                                                                (msm-process-log-command! i cmd-key cmd-val commit-index cache)
-                                                                                {:applied? true :state-changed? false})]
+                    {:keys [:applied? :state-changed? :old-state :new-state]}
+                    (msm-process-log-command! cmd i cmd-key cmd-val commit-index cache)]
                 (when state-changed?
                   (notify-state-changed this old-state new-state))
                 (if applied?
@@ -139,7 +143,8 @@
   (get-state [this resource-id default]
     (@cache resource-id default))
   (add-state-change-listener [this listener]
-    (dosync (alter listeners conj listener)))
+    (dosync (alter listeners conj listener))
+    (get-state this))
   (remove-state-change-listener [this listener]
     (dosync (ref-set listeners (remove #(= listener %) @listeners))))
   (notify-state-changed [this old-state new-state]
