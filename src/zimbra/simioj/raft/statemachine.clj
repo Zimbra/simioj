@@ -19,7 +19,31 @@
   to the followers.  Once a quorum of servers have persisted the command
   their log, it is said to be committed.  Committed commands are applied
   to the state.  The Raft protocol guarantees that all commands received
-  by the system are applied to the state in the same order on all servers."
+  by the system are applied to the state in the same order on all servers.
+
+  There is one exception to the \"committed\" rule.  The state machine that
+  is responsible for processing Raft server configuration changes
+  ALWAYS processes a :set-config log entry immediately, regardless of the
+  commit-index.
+
+  Implementer's Notes:
+
+  1. The Raft :leader has to invoke the state machine's process-log!
+     twice for every command that it receives.  It is invoked immediately
+     after storing the command locally.  This gives any state machines
+     that can operate on pre-committed log entries the opportunity
+     to do so.  The state machine that processes :set-config commands
+     it the primary one that needs to run.  Then, after it has replicated
+     the command to its followers, the process-log! must be invoked again
+     to allow log entries that are not commited to be processed.
+
+     Therefore, when implementing a state machine, the first thing it
+     should do is check to see if it is allowed to run by comparing
+     its last-applied with the commit-index.
+  2. If a state machine encounters a commited log command that it
+     does not handle, it should still increment it's last-applied
+     value.
+  "
   (process-log! [this log commit-index last-applied]
     "Process applicable log entries.
      Parameters:
@@ -114,11 +138,11 @@
     {:applied? false :state-changed? false}))
 
 
-(deftype MemoryStateMachine [id cmd cache listeners]
+(deftype MemoryStateMachine [cmd cache listeners]
   StateMachine
   (process-log! [this log commit-index last-applied]
-    (logger/debugf "process-log!: id=%s, commit-index=%s, last=applied=%s"
-                id commit-index last-applied)
+    (logger/debugf "process-log!: cmd=%s, commit-index=%s, last=applied=%s"
+                cmd commit-index last-applied)
     (let [[lidx lterm] (last-id-term log)
           examine-indices (range (inc last-applied) (inc lidx))]
       (loop [indices examine-indices
@@ -155,9 +179,6 @@
 (defn make-memory-state-machine
   "Construct an instance of a MemoryStateMachine.
    Parameters;
-     id - The id of the state machine.  Every registered state machine MUST have
-       a unique id.  This is important because it allows the Raft server to
-       keep track of it's last-applied value.
      cmd - The log command this state machine should handle.  Actual production
        state machines wouldn't necessarily need this parameter.  It is required
        here because the sample MemoryStateMachine uses a multi-method to dispatch
@@ -169,4 +190,4 @@
      listeners - An optional list of listener functions that will be called
        when this machine's state changes.
   "
-  [id cmd cache & listeners] (->MemoryStateMachine id cmd cache (ref listeners)))
+  [cmd cache & listeners] (->MemoryStateMachine cmd cache (ref listeners)))

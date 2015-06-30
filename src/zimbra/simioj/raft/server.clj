@@ -212,11 +212,25 @@
   state machine (by MACHINE identifier)."
   [machine servers-config server-state]
   (let [{:keys [:state :voted-for]} @server-state
-        sm (filter #(= machine (.id %)) (:state-machines @servers-config))]
+        sm ((:state-machines @servers-config) machine)]
     (cond
       (not= state :leader) [{:status :moved :server voted-for :state nil} nil]
-      (empty? sm) [{:status :not-found :server voted-for :state nil} nil]
-      :else [{:status :ok :server voted-for} (first sm)])))
+      (nil? sm) [{:status :not-found :server voted-for :state nil} nil]
+      :else [{:status :ok :server voted-for} sm])))
+
+(defn- rs-process-log!
+  "Have all registered statemachines process the log."
+  [{:keys [:log :rpc :election-config :timers
+           :servers-config :server-state :leader-state]
+    :as this}]
+  (let [state-machines (:state-machines @servers-config)
+        {:keys [:last-applied :commit-index]} @server-state
+        new-last-applied (into {}
+                               (map (fn [smid sm]
+                                      (let [la (last-applied smid)
+                                            nla (process-log! sm log commit-index la)]
+                                        [smid nla])) state-machines))]
+    (dosync (alter server-state assoc :last-applied new-last-applied))))
 
 
 (defn- rs-broadcast-timeout-ms
@@ -432,9 +446,7 @@
                   (follower! this))
                 (logger/debugf "rs-append-entries-3: id=%s, server-state=%s"
                                id @server-state)
-                (dorun
-                 (pmap (fn [s]
-                         (process-log! s log servers-config server-state)) state-machines))
+                (rs-process-log! this)
                 {:term new-current-term
                  :success true
                  :conflicting-term nil
@@ -462,8 +474,7 @@
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
                                 new-id (if (nil? command) pidx (post-cmd! log current-term rid command))
-                                _ (dorun (pmap #(process-log! %1 log servers-config server-state)
-                                               state-machines))
+                                _ (and command (rs-process-log! this))
                                 cmd (if (nil? command) []
                                         [{:id new-id :term current-term
                                           :rid rid :command command}])
@@ -483,9 +494,10 @@
                                                           (follower! this)
                                                           {:status :moved :server sid})
                               (< num-success min-quorum) {:status :unavailable :server id}
-                              :else (dosync
-                                     (alter server-state assoc :commit-index new-id)
-                                     {:status :accepted :server id})))
+                              :else (do
+                                      (dosync (alter server-state assoc :commit-index new-id))
+                                      (rs-process-log! this)
+                                      {:status :accepted :server id})))
                           (catch IllegalArgumentException iae {:status :conflict :server id}))
       :else {:status :moved :server voted-for})))
 
@@ -593,7 +605,8 @@
 ;;;             If there are two entries in the servers vector, the first
 ;;;             entry is the current config and the second entry is the new
 ;;;             config that we are transitioning to
-;;;   :state-machines - a sequence of state machine instances
+;;;   :state-machines - a map whose keys are unique state-machine identifiers and whose
+;;;     values are state machine instances.
 ;;;   :leader - if not nil, using configured leader election protocol.  The value
 ;;;     should be the ID of ther server that is supposed to be the leader.
 ;;;
@@ -608,10 +621,10 @@
 ;;;     values = map whose key is the state machine command (e.g., :patch)
 ;;;              and whose values are the highest log entry applied to the state
 ;;;              machine for that command.  They start at 0 and increase
-;;;              monotonically. TODO - Restriction: Each state machine should operate
+;;;              monotonically. Restriction: Each state machine should operate
 ;;;              on just one type of command.  Multiple state machines MAY process the
 ;;;              same command.  That's OK, they will have different <state-machine-identifiers>
-;;;              When this is implementerd, values are just integers that reflect the latest
+;;;              When this is implemented, values are just integers that reflect the latest
 ;;;              log entry that was processed by the state machine.
 ;;;   :last-leader-cmd-time - system time in ms when last cmd received from leader.
 ;;;      See spec, section 6, last paragraph.

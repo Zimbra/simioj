@@ -19,7 +19,7 @@
     (let [log (make-log)
           cb-state (ref '())
           cb-fn (fn [old-state new-state] (dosync (ref-set cb-state (list old-state new-state))))
-          sm (make-memory-state-machine :config-sm :set-config (ref {}) cb-fn)
+          sm (make-memory-state-machine :set-config (ref {}) cb-fn)
           last-applied (process-log! sm log 0 0)]
       (is (= last-applied 3))
       (is (= @cb-state (list {} {:servers [#{} #{:s0}]})))
@@ -30,7 +30,7 @@
     (let [log (make-log)
           cb-state (ref '())
           cb-fn (fn [old-state new-state] (dosync (ref-set cb-state (list old-state new-state))))
-          sm (make-memory-state-machine :noop-sm :noop (ref {}) cb-fn)
+          sm (make-memory-state-machine :noop (ref {}) cb-fn)
           last-applied-0 (process-log! sm log 0 0)
           last-applied-1 (process-log! sm log 1 0)
           last-applied-2 (process-log! sm log 2 1)
@@ -45,7 +45,7 @@
     (let [log (make-log)
           cb-state (ref '())
           cb-fn (fn [old-state new-state] (dosync (ref-set cb-state (list old-state new-state))))
-          sm (make-memory-state-machine :patch-sm :patch (ref {}) cb-fn)
+          sm (make-memory-state-machine :patch (ref {}) cb-fn)
           last-applied-0 (process-log! sm log 0 0)
           last-applied-3 (process-log! sm log 3 0)]
       (is (zero? last-applied-0))
