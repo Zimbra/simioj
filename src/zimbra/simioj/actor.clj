@@ -6,12 +6,13 @@
 
 (defprotocol Actor
   "Implement the Actor protocol when you need to be able to message an
-  independent thread, synchronously or asynchronously."
+  independent thread, synchronously or asynchronously.  Uses a channel
+  that is supplied by a constructor function of the implementing record."
   (thread-cb [this]
     "This is the method that processes the channel message loop and
     drives the wrapped instance.")
-  (start [this] "Start the actor.  TODO - we may not need this.")
-  (stop [this] "Stop the actor.")
+  (start [this] "Start the actor.")
+  (stop [this] "Stop the actor. NOTE: This will cause it channel to be closed.")
   (get-wrapped [this] "return the wrapped instance"))
 
 (defmacro actor-wrapper
