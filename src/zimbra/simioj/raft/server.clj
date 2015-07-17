@@ -466,10 +466,6 @@
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
         min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))]
-    (logger/debugf (str "command!-1: id=%s,  commit-index=%s, current-term=%s, state=%s, "
-                        "voted-for=%s, followers=%s, min-quorum=%s")
-                   id commit-index current-term
-                   state voted-for followers min-quorum)
     (cond
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
@@ -485,8 +481,6 @@
                                                               commit-index))
                                 num-success (count (filter :success (vals resp)))
                                 max-term (apply max (cons current-term (map :term (remove :success (vals resp)))))]
-                            (logger/debugf "command!-2: id=%s, num-success=%s, max-term=%s, resp=%s"
-                                           id num-success max-term resp)
                             (cond
                               (< current-term max-term) (let [[sid _] (first (filter (fn [[s {:keys [:success :term]}]]
                                                                                        (and (not success) (= term max-term)))
