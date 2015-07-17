@@ -86,12 +86,6 @@
 ;;;; Config helper functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defn cluster-quorum
-  "Given a map containing {::discovery <discovery-config>}
-   return the number of nodes required to make quorum."
-  [cfg]
-  (inc (bit-shift-right (:expected-nodes (:discovery cfg)) 1)))
-
 
 (defn local-node-info
   "Given a map containing {:node <node-configuration>}
