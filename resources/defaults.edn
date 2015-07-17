@@ -21,7 +21,7 @@
          }}
 ;;; Configure the method the system will use to "discover" all of the
 ;;; nodes in the cluster
- {:discovery {;; :unicast, :multicast, :disabled (for single node clusters)
+ {:discovery {;; :unicast, :multicast (TODO), :disabled (for single node clusters)
               :method :disabled
               ;; Used if :discover-method is :unicast
               ;; list of ip-address port-number pairs (as many as you like)
@@ -30,10 +30,20 @@
               ;; Discovery will not complete until there is a quorum.
               ;; Quorum is defined as (inc (bit-shift-right expected-nodes 1))
               :expected-nodes 1
+              ;; After :eviction-time milliseconds a node will be removed from
+              ;; the cluster topology map
+              :eviction-time 60000
+              ;; After initial quorum has been reached, the discovery
+              ;; module will continue to query all of the nodes that it
+              ;; knows about every :poll-interval milliseconds.  If more
+              ;; than :eviction-time seconds has passed w/o communication
+              ;; with a node, it is evicted from the nodes topology map
+              ;; and listeners are notified.
+              :poll-interval 1000
               ;; The cluster raft will not be started until
               ;; (1) we have discovered expected-nodes, or
-              ;; (2) we have quorum and quorum-timeout seconds have elapsed
-              :quorum-timeout 30}}
+              ;; (2) we have quorum and quorum-timeout milliseconds have elapsed
+              :quorum-timeout 30000}}
  ;;; Configuration for the cluster-wide Raft that is responsible
  ;;; for reliable replication of shard allocation and node topology
  {:cluster-raft {;; Raft log implementation (:sqlite, :memory)
