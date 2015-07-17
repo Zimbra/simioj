@@ -6,19 +6,14 @@
 
 
 (defn advertise
-  "Issue a POST request to the advertise endpoint (ADDRESS/advertise) with MESSAGE
-as the body of the post and return the response.  The MESSAGE is expected to be a map
-of node-identifiers (see config).
+  "Issue a PUT request to the advertise endpoint (ADDRESS/advertise)
+  with MESSAGE as the body of the post and return the response.  The
+  MESSAGE is expected to be a map of node-identifiers (see config).
 
-
-Returns a map with the following information (at a minimum):
-  {:status <http-status-code> :content-type <content-type> :body <body-of-response>
+  Returns a merged node map or nil if endpoint could not be
+  contacted.
   "
   [address message]
-  (log/debugf "advertise '%s': address='%s', message='%s'"
-             (.getId (Thread/currentThread))
-             address
-             message)
   (try
     (let [url (format "http://%s/advertise" address)]
       (:body (http/put url {:content-type "application/edn"
@@ -27,7 +22,7 @@ Returns a map with the following information (at a minimum):
                      :as :clojure})))
     (catch java.net.ConnectException e
       (log/error "advertise: client-put exception %s" (.getMessage e))
-      {:status 503 :content-type "application/edn" :body message})))
+      nil)))
 
 
 (defn campaign
