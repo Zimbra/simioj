@@ -1,32 +1,33 @@
-# simioj
+## Simioj - Distribute Execution Environment
 
-Simioj - Asynchronous Task Framework
+![](./doc/img/simioj-logo-only-sm.png)
 
-## Installation
+Welcome to the Zimbra _Simioj_ project.   _Simioj_ is designed to be
+an extensible framework that allows for the reliable execution of
+tasks in a clustered environment.
 
-Download from http://example.com/FIXME
+Examples of the type of tasks that it could support include, but are
+not limited to:
 
-## Usage
+- A distributed, replicated key-value system the supports functional
+  metadata updates via `PATCH` operations.
+- Maintenance of per-resource queues of asynchronous operations with
+  guarantees that only a single actor in the system will operate on
+  that resource at one time.
 
-FIXME: explanation
+## Work-in-Progress
 
-    $ java -jar simioj-0.1.0-standalone.jar [args]
+This project is a work-in-progress.  This _README_ will be updated
+when it is ready for public consumption.
 
-## Options
-
-FIXME: listing of options this app accepts.
-
-## Examples
-
-FIXME: add examples
 
 ## Organization
 
-Major components defined in `zimbra.simioj`
+Major components in `zimbra.simioj`
 
 - actor
-    - Convert a `type` or `record` to process messages in its own
-      thread using a `core.async` `chan` as the mailbox
+    - Convert a `type` or `record` such that it can process messages
+      in its own thread using a `core.async` channel as the mailbox.
 - config
     - Load and merge configuration
     - Accessor functions for various configuration items
@@ -46,6 +47,23 @@ Major components defined in `zimbra.simioj`
         - Raft statemachine protocol and core implementations
 - util
     - Miscellaneous utility functions that don't belong anywhere else.
+
+## Raft Consensus Algorithm
+
+_Simioj_ uses an implementation of the
+[Raft Consensus Algorithm](https://raftconsensus.github.io/) to
+maintain a hierarchy of distributed state machines.
+
+At the top level there will be a cluster-wide state machine that uses
+the normal Raft election protocol.  The default implementation
+provided will be used to maintain a pool of shards that is distributed
+across the cluster.  The number of shards and the number of replicas
+will be controlled via configuration.
+
+Each "leader" shard and its associated replicas (followers) will form
+a separate "micro" Raft cluster.  A default _logging_ state machine
+implementation that allows for resource-level logging operations
+will be provided.
 
 
 ## License
