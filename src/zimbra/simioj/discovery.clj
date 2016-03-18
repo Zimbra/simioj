@@ -21,7 +21,7 @@
   [expected-nodes]
   (inc (bit-shift-right expected-nodes 1)))
 
-(defn- ^:no-doc timestamp-now
+(defn timestamp-now
   "Returns number of milliseconds since the epoch"
   []
   (.getTime (java.util.Date.)))
@@ -33,10 +33,11 @@
   [nodes eviction-time]
   (let [now (timestamp-now)]
     (into {} (remove (fn [[id v]]
-                       (< (+ (v :contacted 0) eviction-time) now))
+                       (< (+ (v :contacted now) eviction-time) now))
                      nodes))))
 
-(defn- ^:no-doc update-toplogy-clustered
+
+(defn update-toplogy-clustered
   "Given a TOPOLOGY map, will check to see if we know about enough
   nodes to establish a cluster.
   Parameters:
@@ -57,7 +58,7 @@
        a. We have a quorum, and
        b. The amount of time that has passed since we reached
           a quorum (:quorum-time topology) + QUORUM-TIMEOUT
-          > <now>.
+          < <now>.
   "
   [topology expected-nodes quorum-timeout eviction-time]
   (let [min-quorum (cluster-quorum expected-nodes)
@@ -70,7 +71,7 @@
                       (topology :quorum-time 0))
         have-cluster? (or (>= num-nodes expected-nodes)
                           (and (>= num-nodes min-quorum)
-                               (> (+ quorum-time quorum-timeout) now)))]
+                               (< (+ quorum-time quorum-timeout) now)))]
     (assoc topology :quorum-time quorum-time :have-cluster? have-cluster?)))
 
 (defn- ^:no-doc gen-node-addresses
@@ -90,13 +91,18 @@
 
 (defprotocol Discovery
   (discover [this]
-    "Perform discovery.  Returns new topology map.")
+    "Perform discovery.  Continues to loop until stopped.  Notifies
+     all register topology-change-listeners as needed.")
+  (notify! [this node-map]
+    "Is called by other nodes when they want to notify us of their NODE-MAP.
+     Our behavior is to update our topology accordingly and return a
+     new NODE-MAP to the caller that is the ")
   (merge! [this new-topology]
     "Merges the NEW-TOPOLOGY map with our known-topology and returns
      the merged topology.  TOPOLOGY will contain the following minimum
      information:
-    {have-cluster? true (if minimum-expected-nodes) | false
-     nodes <node-map>}
+    {:have-cluster? true (if minimum-expected-nodes) | false
+     :nodes <node-map>}
     where <node-map> is:
       {<node-id> {:name <node-name> :address <address:port>}
        ...
@@ -115,10 +121,10 @@
     "Return current known topology"))
 
 (defprotocol DiscoveryRPC
-  (advertise [this address node-map]
-    "Present NODE-MAP to the the server at ADDRESS.  This server
-    is expected to update its own node-map with NODE-MAP and return
-    the result.
+  (notify-server! [this address node-map]
+    "Present NODE-MAP to the the server at ADDRESS by invoking
+    its notify! function.  This server is expected to update its own
+    node-map with NODE-MAP and return the result.
     Implementation Node:  The RPC entity that implements this method
       should return nil if it cannot contact the server at ADDRESS."))
 
@@ -145,14 +151,14 @@
 
 
 (defn- cd-discover-advertise [rpc addresses node-map]
-  (let [rmap (into {} (pmap (fn [a] {a (advertise rpc a node-map)}) addresses))
+  (let [rmap (into {} (pmap (fn [a] {a (notify-server! rpc a node-map)}) addresses))
         gaddr (map first (filter second rmap))
         nodes (apply merge (map second (filter second rmap)))
         now (timestamp-now)]
     (into {} (map (fn [[id v]] {id (assoc v :contacted now)}) nodes))))
 
 
-(defmethod cd-discover :unicast [{:keys [:cfg :rpc :topology] :as cd}]
+(defn- cd-discovery-loop [{:keys [:cfg :rpc :topology] :as cd}]
   (let [{:keys [:eviction-time :expected-nodes :initial-nodes :poll-interval :quorum-timeout]} cfg]
     (loop [addresses (gen-node-addresses :seed-nodes initial-nodes :topology @topology)]
       (let [old-avail-ids (keys (recently-contacted-nodes (:nodes @topology) eviction-time))
@@ -161,12 +167,26 @@
                           (assoc @topology :nodes nodes)
                           expected-nodes
                           quorum-timeout eviction-time)]
+        (logger/debugf "CD-DISCOVERY-LOOP: id=%s; OLD: cluster?=%s, nodes=%s; NEW: cluster?=%s, nodes=%s"
+                       (:id @topology) (:have-cluster? @topology) old-avail-ids (:have-cluster? new-topology) (keys nodes))
         (when (or (not= (:have-cluster? @topology) (:have-cluster? new-topology))
                   (not= (keys nodes) old-avail-ids))
           (notify cd @topology new-topology)
           (dosync (ref-set topology new-topology))))
       (Thread/sleep poll-interval)
       (recur (gen-node-addresses :topology @topology)))))
+
+
+(defmethod cd-discover :unicast [this]
+  "Start the discovery loop."
+  (logger/debug "CD-DISCOVER: starting discovery loop")
+  (future (cd-discovery-loop this)))
+
+
+(defn- cd-notify! [{:keys [:topology]} node-map]
+  (let [merged-node-map (merge (:nodes @topology) node-map)]
+    (dosync (alter topology assoc :nodes merged-node-map))
+    merged-node-map))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -203,6 +223,7 @@
 (defn- cd-notify [{:keys [:listeners]} old new]
   (dorun (pmap #(% old new) @listeners)))
 
+
 (defn- cd-get-topology [{:keys [:topology]}]
   topology)
 
@@ -219,9 +240,11 @@
    :discover cd-discover
    :merge! cd-merge!
    :notify cd-notify
+   :notify! cd-notify!
    :get-topology cd-get-topology})
 
 (actor-wrapper ClusterDiscoveryActor [Discovery] defrecord)
+
 
 (defn- init-persistent-topology
   "Initialize the topology map that is used by Discovery.
@@ -235,20 +258,25 @@
     <node-map> keys are node identifiers and values contain (at a
     minimum {:name <node-name> :address <node-address>}
   "
-  [cfg]
+  [data-dir default]
+  (let [local-topo-path (.getAbsolutePath (clojure.java.io/file
+                                           data-dir
+                                           "topology.edn"))]
+    (make-persisting-ref local-topo-path :default default)))
+
+(defn- init-topology [cfg]
   (let [local-node-info (config/local-node-info cfg)
-        local-topo-path (.getAbsolutePath (clojure.java.io/file
-                                          (:data-dir (:node cfg))
-                                          "topology.edn"))
-        t-ref (make-persisting-ref
-               local-topo-path
-               :default {:id (first (keys (local-node-info)))
-                         :have-cluster? false
-                         :quorum-time? 0
-                         :nodes {}})]
+        default {:id (first (keys local-node-info))
+                 :have-cluster? false
+                 :quorum-time 0
+                 :nodes {}}
+        data-dir (:data-dir (:node cfg))
+        t-ref (if data-dir
+                (init-persistent-topology data-dir default)
+                (ref default))]
     (dosync
      (ref-set t-ref (-> @t-ref
-                        (assoc :id (first (keys (local-node-info))))
+                        (assoc :id (first (keys local-node-info)))
                         (assoc :have-cluster? false)
                         (assoc :quorum-time 0)
                         (assoc :nodes (merge (:nodes @t-ref) local-node-info)))))
@@ -266,7 +294,7 @@
       called anytime the topology map of known nodes is updated.  It is
       is called with 2 arguments: <old-topology> <new-topology>."
   [rpc cfg & listeners]
-  (let [topo-ref (init-persistent-topology cfg)
+  (let [topo-ref (init-topology cfg)
         sd (->ClusterDiscovery rpc (:discovery cfg) topo-ref (ref listeners))
         sda (->ClusterDiscoveryActor (chan) sd)]
     (start sda)
