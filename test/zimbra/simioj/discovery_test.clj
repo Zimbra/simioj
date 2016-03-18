@@ -79,7 +79,8 @@
   (let [d (make-cluster-discovery rpc cfg listener)]
     (dosync (alter *nodes* assoc (get-in cfg [:node :endpoint :http]) d))
     (Thread/sleep 500)
-    (discover d)))
+    (discover d)
+    d))
 
 
 (deftest unicast-discovery-cluster-test
@@ -93,7 +94,8 @@
           cd3 (future (instance rpc c3 test-discovery-change-listener))]
       (print "sleeping for 10 secs\n") (flush)
       (Thread/sleep 10000)
-      (pmap #'stop-discovery (list cd1 cd2 cd3))
+      (doseq [d (list @cd1 @cd2 @cd3)]
+        (stop-discovery d))
       (print "awakened from sleep\n") (flush)
       ;; (clojure.pprint/print-table (vals @*listener*)) (flush)
       ;; (clojure.pprint/pprint @*listener*) (flush)

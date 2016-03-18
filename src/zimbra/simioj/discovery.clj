@@ -177,8 +177,8 @@
       (recur (gen-node-addresses :topology @topology)))))
 
 
+;; Start the discovery loop.
 (defmethod cd-discover :unicast [this]
-  "Start the discovery loop."
   (logger/debug "CD-DISCOVER: starting discovery loop")
   (future (cd-discovery-loop this)))
 

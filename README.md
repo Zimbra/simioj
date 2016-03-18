@@ -15,6 +15,26 @@ not limited to:
   guarantees that only a single actor in the system will operate on
   that resource at one time.
 
+## Additional Set-Up for Code Quality Checks
+
+Recommend adding the following to `$HOME/.lein/profiles.clj`:
+
+    {:user {:dependencies [[acyclic/squiggly-clojure "0.1.5"]
+                           [org.clojure/tools.nrepl "0.2.7"]]
+            :aliases {"bikeshed" ["bikeshed" "--max-line-length" "132"]}
+            :plugins [[cider/cider-nrepl "0.12.0-SNAPSHOT"]
+                      [jonase/kibit "0.0.8"]
+                      [lein-kibit "0.1.2"]
+                      [lein-cloverage "1.0.6"]
+                      [lein-bikeshed "0.3.0"]
+                      [jonase/eastwood "0.2.3" :exclusions [org.clojure/cojure]]
+                      [lein-bin "0.3.5"]]}}
+
+Then, before committing any work, run the following and fix any issues
+that are reported:
+
+    lein do kibit, eastwood, bikeshed
+
 ## Work-in-Progress
 
 This project is a work-in-progress.  This _README_ will be updated
