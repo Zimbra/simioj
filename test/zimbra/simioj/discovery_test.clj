@@ -1,7 +1,7 @@
 (ns zimbra.simioj.discovery-test
   (:require [clojure.test :refer :all]
             [zimbra.simioj [actor :refer :all]]
-            [zimbra.simioj.discovery :refer :all]
+            [zimbra.simioj.discovery.discovery :refer :all]
             [zimbra.simioj.config :as config]
             [zimbra.simioj.util :refer :all]))
 

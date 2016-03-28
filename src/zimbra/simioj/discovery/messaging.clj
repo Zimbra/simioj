@@ -1,4 +1,4 @@
-(ns zimbra.simioj.messaging
+(ns zimbra.simioj.discovery.messaging
   (:gen-class)
   (:require [zimbra.simioj.config :as config]
             [clojure.tools.logging :as log]

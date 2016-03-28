@@ -1,10 +1,10 @@
-(ns zimbra.simioj.discovery
+(ns zimbra.simioj.discovery.discovery
   (:require [clojure.string :as string]
             [clojure.core.async :refer [chan <!! >!! close!]]
             [clojure.tools.logging :as logger]
             [zimbra.simioj [actor :refer :all]]
             [zimbra.simioj.config :as config]
-            [zimbra.simioj.messaging :as msg]
+            [zimbra.simioj.discovery.messaging :as msg]
             [zimbra.simioj.util :refer [make-persisting-ref]])
   (:gen-class))
 
