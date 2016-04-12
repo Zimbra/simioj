@@ -98,13 +98,14 @@
     "Used by (internal) clients to submit a command to the system for
     application to the state.
     Parameters:
-      RID - A client-generated request ID.  Every command submitted
+      RID - (str) A client-generated request ID.  Every command submitted
         to the system must have a unique request ID.  It is recommended
         that the clients use either a UUID or a value of the form
         <client-id>-<request-serial-number> or some other construction
         that is guaranteed to be unique.  If a new command is submitted to
         the system that uses the same RID as a previous command, the
         system will not store the new command.
+      COMMAND ???
     Response: {:status :accepted   ; command accepted and committed
                        :conflict   ; duplicate RID
                        :moved      ; permanent redirect to :server
@@ -160,7 +161,7 @@
   (append-entries [this entries] [this server-ids entries]
     "Invoked by leader to replicate log entries; also used as heartbeat.
     ENTRIES is an instance of Entry.
-    SERVER-IDS is a list of one or more server IDs.
+    SERVER-IDS is a seq of one or more server IDs.
     The first form should return a map
       {:term <current-term>
        :success <boolean>
@@ -196,12 +197,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defn- system-time-ms
+(defn system-time-ms
   "Return the current system time, in milliseconds."
   []
   (System/currentTimeMillis))
 
-(defn- generate-rid
+(defn generate-rid
   "Generates a random request ID (string)"
   []
   (str (java.util.UUID/randomUUID)))
@@ -244,94 +245,89 @@
 (defn- rs-election-timeout-ms
   "Computes a random election timeout between the minimum
   and maximum configuration settings."
-  [{:keys [:election-timeout-min :election-timeout-max]}]
-  (+ (rand-int (- election-timeout-max election-timeout-min)) election-timeout-min))
+  [{:keys [:election-timeout-min :election-timeout-max] :or {:election-timeout-min 150 :election-timeout-max 300}}]
+  (let [tout (+ (rand-int (- election-timeout-max election-timeout-min)) election-timeout-min)]
+    (logger/debugf "rs-election-timeout-ms: tout=%s" tout)
+    tout))
 
 
 (defn- rs-start-timers!
   "Start all state-specific timer(s).
   Mutates: The timers ref.
   "
-  [{:keys [:election-config :server-state :timers]
+  [{:keys [:id :election-config :server-state :timers]
     :as this}]
+  (logger/debugf "rs-start-timers!: id=%s, election-config=%s, state=%s"
+                 id election-config (:state @server-state))
   (let [state (:state @server-state)]
     (condp = state
-      :follower (let [follower-timer (future (Thread/sleep
-                                              (rs-election-timeout-ms @election-config))
-                                             (candidate! this))]
+      :follower (let [follower-timer (future (Thread/sleep (rs-election-timeout-ms election-config))
+                                             (try
+                                               (candidate! this)
+                                               (catch Exception e
+                                                 (logger/warnf "follower election timeout exception: id=%s, ex=%s" id e))))]
                   (dosync
                    (ref-set timers {:follower follower-timer})))
-      :candidate (let [candidate-timer (future (Thread/sleep
-                                                (rs-election-timeout-ms @election-config))
-                                               (candidate! this))]
+      :candidate (let [candidate-timer (future (Thread/sleep (rs-election-timeout-ms election-config))
+                                               (try
+                                                 (candidate! this)
+                                                 (catch Exception e
+                                                   (logger/warnf "candidate election timeout exception: id=%s, ex=%s" id e))))]
                    (dosync (ref-set timers {:candidate candidate-timer})))
-      :leader (let [leader-timer (future (Thread/sleep
-                                          (rs-broadcast-timeout-ms @election-config))
-                                         (leader! this))]
+      :leader (let [leader-timer (future (Thread/sleep (rs-broadcast-timeout-ms election-config))
+                                         (try
+                                           (leader! this)
+                                           (catch Exception e
+                                             (logger/warnf "leader broadcast timeout exception: id=%s, ex=%s" id e))))]
                 (dosync (ref-set timers {:leader leader-timer})))
       nil)))
 
 (defn- rs-cancel-timers!
-  "Cancel all timer(s)."
+  "First form cancels all timer(s).  Second form just cancels specific timer."
   ([{:keys [:timers]}]
    (try
      (dorun (map future-cancel (vals @timers)))
-     (catch Exception e (logger/debugf "rs-cancel-timers!: error=%s" (.getMessage e)))))
+     (catch Exception e (logger/errorf "rs-cancel-timers!/1: error=%s" (.getMessage e)))))
   ([{:keys [:timers]} timer]
    (try
      (dorun (map future-cancel (map second (filter #(= (first %) timer) @timers))))
-     (catch Exception e (logger/debugf "rs-cancel-timers!: timer=%s, error=%s" timer (.getMessage e))))))
+     (catch Exception e (logger/errorf "rs-cancel-timers!/2: timer=%s, error=%s" timer (.getMessage e))))))
 
 
 
 (defn- rs-candidate!
-  "Possibly switch to :candidate mode.  This function handles two cases:
-  1. We are using normal Raft election protocol
-  2. We are using configured leader protocol.
-  Normal Raft Protocol (leader in server-config is nil)
+  "Switch to :candidate mode.
   - election timeout occurred
   - increment term counter, switch to :candidate mode, and request votes
-  Configured Raft Protocol (the servers-config has a non-nil leader).
-  - If either of the following is true, we switch to :candidate mode:
-    - election timeout occurred and we don't have a current leader assigned
-      (voted-for is nil)
-    - we are configured to be the :leader but we are not
   "
   [{:keys [:election-config :id :leader-state :log :rpc :server-state :servers-config :timers]
     :as this}]
-  (logger/debugf "rs-candidate! id=%s, server-state=%s"
-                 id @server-state)
+  ;; (cancel-timers! this)
+  (logger/debugf "rs-candidate!: id=%s, server-state=%s" id @server-state)
   (let [leader (:leader @servers-config)
         voted-for (:voted-for @server-state)
         followers (disj (apply clojure.set/union
                                (:servers @servers-config)) id)]
-    (cancel-timers! this)
-    (if (or (nil? leader)
-            (and (= id leader) (not= leader voted-for)))
-      (let [new-term (inc (:current-term @server-state))]
-        (dosync (alter server-state assoc
-                       :state :candidate
-                       :current-term new-term
-                       :voted-for nil))
-        (let [min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))
-              [lid lterm] (last-id-term log)
-              resp (request-vote rpc
-                                 followers
-                                 (->Vote new-term id lid lterm))
-              num-success (count (filter :vote-granted (vals resp)))
-              max-term (apply max (map :term (vals resp)))]
-          (logger/debugf (str
-                          "rs-candidate! id=%s, new-term=%s, "
-                          "lid=%s, lterm=%s, resp=%s")
-                         id new-term lid lterm resp)
-
-          (if (< num-success min-quorum)
-            (do
-              (start-timers! this)
-              (when (> max-term new-term)
-                (dosync (alter server-state assoc :current-term max-term))))
-              (leader! this new-term))))
-      (follower! this))))
+    (let [new-term (inc (:current-term @server-state))]
+      (dosync (alter server-state assoc
+                     :state :candidate
+                     :current-term new-term
+                     :voted-for nil))
+      (let [min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))
+            [lid lterm] (last-id-term log)
+            resp (request-vote rpc
+                               followers
+                               (->Vote new-term id lid lterm))
+            num-success (count (filter :vote-granted (vals resp)))
+            max-term (apply max (map :term (vals resp)))]
+        (logger/debugf "rs-candidate!: id=%s, new-term=%s, lid=%s, lterm=%s, num-succes=%s, max-term=%s, resp=%s"
+                       id new-term lid lterm num-success max-term resp)
+        (if (< num-success min-quorum)
+          (do
+            (when (> max-term new-term)
+              (dosync (alter server-state assoc :current-term max-term)))
+            (follower! this))
+          (leader! this new-term))))))
 
 (defn- rs-follower!
   "Implementation of the Election protocol follower! function
@@ -339,6 +335,8 @@
   [{:keys [:election-config :id :timers :server-state]
     :as this}]
   (cancel-timers! this)
+  (logger/debugf "rs-follower!: id=%s, server-state=%s"
+                 id @server-state)
   (dosync
    (alter server-state assoc :state :follower))
   (start-timers! this))
@@ -348,32 +346,39 @@
     "The arity/1 function trigers the leader to broadcast an
      empty append-entries RPC to all of its follows if normal
      Raft election is being used.  If configured Raft election is
-     being used this is a noop.
+     being used this is a noop. TODO - change to honor new
+     `leader affinity`.
     The arity/2 function is called when a :candidate wins an
     election and needs to transition to :leader state."
 
   ([{:keys [:id :log :rpc :election-config :timers
             :servers-config :server-state :leader-state]
      :as this}]
-   (cancel-timers! this)
-   (let [leader (:leader @election-config)
+   ;;(cancel-timers! this)
+   (logger/debugf "rs-leader!/1: id=%s, server-state=%s, leader-state=%s"
+                  id @server-state @leader-state)
+   (let [leader (:leader election-config)
          [lid lterm] (last-id-term log)
-         commit-index (:commit-index @server-state)]
-     (when (or (nil? leader)
-               (< commit-index lid))
-       (command! this (generate-rid) nil))
-     (start-timers! this)))
+         commit-index (:commit-index @server-state)
+         resp (command! this (generate-rid) nil)]
+     (logger/debugf "rs-leader!/1: id=%s, resp=%s" id resp)
+     (when (= (:status resp) :accepted)
+       (start-timers! this))))
   ([{:keys [:id :log :rpc :election-config :timers
             :servers-config :server-state :leader-state]
      :as this} new-term]
-   (cancel-timers! this)
+   ;;(cancel-timers! this)
+   (logger/debugf "rs-leader!/2: id=%s, new-term=%s, server-state=%s, leader-state=%s"
+                  id new-term @server-state @leader-state)
    (dosync (alter server-state assoc
                   :current-term new-term
                   :state :leader
                   :voted-for id))
-   (command! this (generate-rid) {:noop {}})
-   (start-timers! this)))
-
+   (let [resp (command! this (generate-rid) nil)]
+     (logger/debugf "rs-leader!/2: id=%s, resp=%s" id resp)
+     (if (= (:status resp) :accepted)
+       (start-timers! this)
+       (follower! this)))))
 
 
 (def rs-basicraft-election
@@ -394,6 +399,7 @@
    {:keys [:term :leader-id
            :prev-log-index :prev-log-term
            :entries :leader-commit]}]
+  (cancel-timers! this)
   (logger/debugf (str "rs-append-entries-1: id=%s, term=%s, leader-id=%s, "
                       "prev-log-index=%s, prev-log-term=%s, "
                       "entries=%s, leader-commit=%s")
@@ -410,62 +416,68 @@
                                      (some (fn [i] (let [term (:term (get-entry log i))]
                                                      (when-not (= term sterm) (inc i))))
                                            (range sidx 0 -1))
-                                     sidx))]
-    (logger/debugf (str "rs-append-entries-2: id=%s servers-config=%s, "
-                        "server-state=%s, current-term=%s, "
-                        "commit-index=%s, pentry=%s, eentry=%s, "
-                        "lid=%s, lterm=%s")
-                   id @servers-config @server-state
-                   current-term commit-index
-                   pentry eentry lid lterm)
-    (cond
-      (< term current-term) {:term current-term
-                             :success false
-                             :conflicting-term nil
-                             :conflicting-first-idx nil}
-      (not= lterm prev-log-term) {:term current-term
-                                  :success false
-                                  :conflicting-term lterm
-                                  :conflicting-first-idx (find-first-conflicting-id lid lterm)}
-      :else (do
-              (when (and eentry (not= (:term eentry) term))
-                (rtrim-log! log (inc prev-log-index)))
-              (doseq [{:keys [:id :term :rid :command]} entries]
-                (put-cmd! log id term rid command))
-              (let [[last-new-idx _] (last-id-term log)
-                    new-current-term term
-                    new-commit-index (if (> leader-commit commit-index)
-                                       (min leader-commit last-new-idx)
-                                       commit-index)]
-                (dosync (alter server-state assoc
-                               :current-term new-current-term
-                               :voted-for leader-id
-                               :last-leader-cmd-time (system-time-ms)
-                               :commit-index new-commit-index))
-                (when (not= (:state @server-state) :follower)
-                  (follower! this))
-                (logger/debugf "rs-append-entries-3: id=%s, server-state=%s"
-                               id @server-state)
-                (rs-process-log! this)
-                {:term new-current-term
-                 :success true
-                 :conflicting-term nil
-                 :conflicting-first-idx nil})))))
+                                     sidx))
+        _ (logger/debugf (str "rs-append-entries-2: id=%s servers-config=%s, "
+                              "server-state=%s, current-term=%s, "
+                              "commit-index=%s, pentry=%s, eentry=%s, "
+                              "lid=%s, lterm=%s")
+                         id @servers-config @server-state
+                         current-term commit-index
+                         pentry eentry lid lterm)
+        rc (cond
+             (< term current-term) {:term current-term
+                                    :success false
+                                    :conflicting-term nil
+                                    :conflicting-first-idx nil}
+             (not= lterm prev-log-term) {:term current-term
+                                         :success false
+                                         :conflicting-term lterm
+                                         :conflicting-first-idx (find-first-conflicting-id lid lterm)}
+             :else (do
+                     (when (and eentry (not= (:term eentry) term))
+                       (rtrim-log! log (inc prev-log-index)))
+                     (doseq [{:keys [:id :term :rid :command]} entries]
+                       (put-cmd! log id term rid command))
+                     (let [[last-new-idx _] (last-id-term log)
+                           new-current-term term
+                           new-commit-index (if (> leader-commit commit-index)
+                                              (min leader-commit last-new-idx)
+                                              commit-index)]
+                       (dosync (alter server-state assoc
+                                      :current-term new-current-term
+                                      :voted-for leader-id
+                                      :last-leader-cmd-time (system-time-ms)
+                                      :commit-index new-commit-index))
+                       (logger/debugf "rs-append-entries-3: id=%s, server-state=%s"
+                                      id @server-state)
+                       (rs-process-log! this)
+                       {:term new-current-term
+                        :success true
+                        :conflicting-term nil
+                        :conflicting-first-idx nil})))]
+    (follower! this)
+    rc))
 
 
 (defn- rs-command!
   "Send a command to the leader of the state machine.  If COMMAND is nil,
   the system will issue an 'empty' command, like what the leader does when
-  it broadcasts heartbeats. This does not get stored in the log."
+  it broadcasts heartbeats. This does not get stored in the log.
+  Returns a map that contains the following at a minimum:
+    {:status <status>}
+  "
   [{:keys [:id :log :rpc :server-state :servers-config]
     :as this}
    rid command]
+
   (let [{:keys [:commit-index :current-term :state :voted-for]} @server-state
         state-machines (:state-machines @servers-config)
-        followers (disj (apply clojure.set/union (:servers @servers-config)) id)
+        followers (seq (disj (apply clojure.set/union (:servers @servers-config)) id))
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
         min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))]
+    (logger/debugf "rs-command!-1: id=%s command?=%s commit-index=%s, current-term=%s, state=%s, voted-for=%s, followers=%s"
+                   id (some? command) commit-index current-term state voted-for followers)
     (cond
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
@@ -474,11 +486,13 @@
                                 cmd (if (nil? command) []
                                         [{:id new-id :term current-term
                                           :rid rid :command command}])
-                                resp (append-entries rpc
-                                                     followers
-                                                     (->Entry current-term id pidx pterm
-                                                              cmd
-                                                              commit-index))
+                                resp (if (seq? followers) (append-entries rpc
+                                                                          followers
+                                                                          (->Entry current-term id pidx pterm
+                                                                                   cmd
+                                                                                   commit-index))
+                                         {})
+                                _ (logger/debugf "rs-command!-2: id=%s, append-entries resp=%s" id resp)
                                 num-success (count (filter :success (vals resp)))
                                 max-term (apply max (cons current-term (map :term (remove :success (vals resp)))))]
                             (cond
@@ -492,7 +506,9 @@
                                       (dosync (alter server-state assoc :commit-index new-id))
                                       (rs-process-log! this)
                                       {:status :accepted :server id})))
-                          (catch IllegalArgumentException iae {:status :conflict :server id}))
+                          (catch IllegalArgumentException iae
+                            (logger/warnf "rs-command!: id=%s Exception: %s" id iae)
+                            {:status :conflict :server id}))
       :else {:status :moved :server voted-for})))
 
 
@@ -659,7 +675,7 @@
      id - the server id
      log - a Log instance
      rpc - an RPC instance (basically anything that implements the RaftProtocol
-     election-config - a map with the following entries [static]
+     election-config - a map with the following entries [static - NOT a ref]
        :broadcast-timeout - time in ms for leader broadcast
        :election-timeout-min - minimum time in ms for election timeout
        :election-timeout-max - maximum time in ms for election timeout
@@ -674,7 +690,9 @@
                              (ref servers-config)
                              (ref server-state)
                              (ref leader-state))))
-
+(defn make-simple-raft-server
+  [id log rpc ec sc ss ls]
+  (RaftServer. id log rpc ec (ref {}) (ref sc) (ref ss) (ref ls)))
 
 ;; (defmulti make-raft
 ;;   (fn [cfg rpc] (:cluster-raft (:local cfg)))
