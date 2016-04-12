@@ -1,0 +1,95 @@
+(ns zimbra.simioj.raft-election-test
+  (:require [clojure.test :refer :all]
+            [clojure.core [async :refer [chan]]]
+            [clojure.tools.logging :as logger]
+            [zimbra.simioj [actor :refer :all]]
+            [zimbra.simioj.raft [server :refer :all]]
+            [zimbra.simioj.raft [log :refer :all]]
+            [zimbra.simioj.raft [rpc :refer :all]]))
+
+
+(def raft-servers (ref {}))
+(def raft-rpc (->TestRpc raft-servers))
+
+
+(defn- register-server
+  "Register a SERVER with ID to the pool that is managed by the
+  RAFT-RPC"
+  [id server]
+  (dosync (alter raft-servers assoc id server))
+  server)
+
+(defn- reset-server-registry
+  "Call this at the beginning of every deftest that uses raft-rpc to
+  reset the raft-servers ref."
+  []
+  (dosync (ref-set raft-servers {})))
+
+
+(defn- make-server [id log rpc ec sc ss ls]
+  (register-server id (make-simple-raft-server id log rpc ec sc ss ls)))
+
+(deftest candidate-test
+  (testing "candidate! with basic 3 server raft cluster"
+    (reset-server-registry)
+    (let [sc {:servers [#{:s0 :s1 :s2}]}
+          ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
+          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
+                                  {:state :leader :current-term 1 :voted-for :s0
+                                   :commit-index 0 :last-applied 0}
+                                  {:s1 {:next-index 1 :match-index 0}
+                                   :s2 {:next-index 1 :match-index 0}})
+          s1 (make-server :s1 (make-memory-log) raft-rpc ec sc
+                                  {:state :follower :current-term 1 :voted-for :s0
+                                   :commit-index 0 :last-applied 0}
+                                  {})
+          s2 (make-server :s2 (make-memory-log) raft-rpc ec sc
+                                  {:state :follower :current-term 1 :voted-for :s0
+                                   :commit-index 0 :last-applied 0}
+                                  {})]
+      (dorun (map start-timers! [s0 s1 s2]))
+      ;; first, establish s0 as :leader by sending out :noop
+      (println (command! s0 "r1" [:noop {}])) (flush)
+      (is (= (last-id-term (:log s0)) [1 1]))
+      (is (= (last-id-term (:log s1)) [1 1]))
+      (is (= (last-id-term (:log s2)) [1 1]))
+      (Thread/sleep 10000))))
+
+
+
+(deftest three-server-election-test
+  (testing "test pure election with three servers"
+    (reset-server-registry)
+    ;; Note that for proper functioning we must run each server in its own thread
+    (let [sc {:servers [#{:s0 :s1 :s2}]}
+          ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
+          ecf {:broadcast-timeout 10 :election-timeout-min 3000 :election-timeout-max 6000}
+          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})
+          s1 (make-server :s1 (make-memory-log) raft-rpc ec sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})
+          s2 (make-server :s2 (make-memory-log) raft-rpc ec sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})]
+      (dorun (map follower! [s0 s1 s2]))
+      (Thread/sleep 2000)
+      (println "----- Server States -----")
+      (doseq [s [s0 s1 s2]]
+        (printf "Server=%s, State=%s\n"
+                (:id s) @(:server-state s))
+        (flush))
+      (is (= (count (filter #(= :leader (:state @(:server-state %))) [s0 s1 s2])) 1))
+      (is (= (count (filter #(= :follower (:state @(:server-state %))) [s0 s1 s2])) 2))
+      (let [leader (first (filter #(= :leader (:state @(:server-state %))) [s0 s1 s2]))
+            followers (filter #(= :follower (:state @(:server-state %))) [s0 s1 s2])]
+        (is (some? leader))
+        (when leader
+          (is (= (command! leader "r1" [:noop {}]) {:status :accepted :server (:id leader)}))
+          (Thread/sleep 20)
+          (doseq [f followers]
+            (is (= (command! f (generate-rid) [:noop {}]) {:status :moved :server (:id leader)}))))))))
