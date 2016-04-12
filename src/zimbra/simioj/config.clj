@@ -3,9 +3,12 @@
   (:require [clojure.tools.reader.edn :as edn]
             [clojure.java.io :as io]))
 
+(def default-config-file
+  (io/resource "defaults.edn"))
+
+
 (def default-config
-  (->> "defaults.edn"
-       io/resource
+  (->> default-config-file
        slurp
        edn/read-string))
 
