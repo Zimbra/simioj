@@ -60,7 +60,6 @@
 (deftest three-server-election-test
   (testing "test pure election with three servers"
     (reset-server-registry)
-    ;; Note that for proper functioning we must run each server in its own thread
     (let [sc {:servers [#{:s0 :s1 :s2}]}
           ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
           ecf {:broadcast-timeout 10 :election-timeout-min 3000 :election-timeout-max 6000}
@@ -78,11 +77,11 @@
                           {})]
       (dorun (map follower! [s0 s1 s2]))
       (Thread/sleep 2000)
-      (println "----- Server States -----")
-      (doseq [s [s0 s1 s2]]
-        (printf "Server=%s, State=%s\n"
-                (:id s) @(:server-state s))
-        (flush))
+      ;; (println "----- Server States -----")
+      ;; (doseq [s [s0 s1 s2]]
+      ;;   (printf "Server=%s, State=%s\n"
+      ;;           (:id s) @(:server-state s))
+      ;;   (flush))
       (is (= (count (filter #(= :leader (:state @(:server-state %))) [s0 s1 s2])) 1))
       (is (= (count (filter #(= :follower (:state @(:server-state %))) [s0 s1 s2])) 2))
       (let [leader (first (filter #(= :leader (:state @(:server-state %))) [s0 s1 s2]))
@@ -93,3 +92,38 @@
           (Thread/sleep 20)
           (doseq [f followers]
             (is (= (command! f (generate-rid) [:noop {}]) {:status :moved :server (:id leader)}))))))))
+
+
+(deftest three-server-configured-election-test
+  (testing "test configured election"
+    (reset-server-registry)
+    ;; start :s1 and :s2 with larger election timeouts to guarantee that :s0
+    ;; wins initial election
+    (let [sc {:servers [#{:s0 :s1 :s2}]}
+          ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
+          ecf {:broadcast-timeout 10 :election-timeout-min 300 :election-timeout-max 600}
+          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})
+          s1 (make-server :s1 (make-memory-log) raft-rpc ecf sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})
+          s2 (make-server :s2 (make-memory-log) raft-rpc ecf sc
+                          {:current-term 0
+                           :commit-index 0 :last-applied 0}
+                          {})]
+      (dorun (map follower! [s0 s1 s2]))
+      (Thread/sleep 2000)
+      ;; ensure :s0 won leadership initially
+      (is (= :leader (:state @(:server-state s0))))
+      (is (= :follower (:state @(:server-state s1))))
+      (is (= :follower (:state @(:server-state s2))))
+      ;; update :s2's servers-config
+      (dosync (ref-set (:servers-config s2) (assoc sc :leader :s2)))
+      (Thread/sleep 4000)
+      ;; ensure :s2 reclaimed leadership
+      (is (= :follower (:state @(:server-state s0))))
+      (is (= :follower (:state @(:server-state s1))))
+      (is (= :leader (:state @(:server-state s2)))))))

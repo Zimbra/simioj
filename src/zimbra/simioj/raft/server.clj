@@ -332,14 +332,19 @@
 (defn- rs-follower!
   "Implementation of the Election protocol follower! function
   for a RaftServer"
-  [{:keys [:election-config :id :timers :server-state]
+  [{:keys [:election-config :id :timers :servers-config :server-state]
     :as this}]
-  (cancel-timers! this)
-  (logger/debugf "rs-follower!: id=%s, server-state=%s"
-                 id @server-state)
-  (dosync
-   (alter server-state assoc :state :follower))
-  (start-timers! this))
+  (let [leader (:leader @servers-config)]
+    (cancel-timers! this)
+    (logger/debugf "rs-follower!: id=%s, leader=%s, server-state=%s"
+                   id leader @server-state)
+    (if (and (= leader id)
+             (not= (:state @server-state) :leader))
+      (candidate! this)
+      (do
+        (dosync
+         (alter server-state assoc :state :follower))
+        (start-timers! this)))))
 
 
 (defn- rs-leader!
