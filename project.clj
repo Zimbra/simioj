@@ -23,6 +23,7 @@
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}
              :dev {:dependencies [[ring/ring-mock "0.3.0"]
-                                  [clj-http-fake "1.0.2"]]
+                                  [clj-http-fake "1.0.2"]
+                                  [org.clojure/tools.namespace "0.2.11"]]
                    :plugins [[lein-kibit "0.1.2"]]}}
   :aot :all)
