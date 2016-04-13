@@ -34,7 +34,7 @@
           tm1 {:nodes {:n1 {:contacted now}
                       :n2 {:contacted now}
                        :n3 {:contacted 0}}
-               :quorum-time (- now 999)}
+               :quorum-time (- now 900)}
           tm1u (update-toplogy-clustered tm1 3 1000 1000)]
       (is (not (:have-cluster? tm1u))))))
 
