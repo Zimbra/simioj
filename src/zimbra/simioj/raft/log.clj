@@ -93,7 +93,7 @@
           nid (inc lid)
           entry {:id nid :term term :rid rid :command command}
           nidx (count @log)]
-      (logger/debugf "post-cmd!: term=%d, rid=%s, lid=%d, lterm=%d, nid=%d, nidx=%d"
+      (logger/tracef "post-cmd!: term=%d, rid=%s, lid=%d, lterm=%d, nid=%d, nidx=%d"
                      term rid lid lterm nid nidx)
       (when (not-empty (filter #(= (:rid %) rid) @log))
         (throw (IllegalArgumentException.
@@ -105,7 +105,7 @@
     (let [[lid lterm] (last-id-term this)
           entry {:id id :term term :rid rid :command command}
           nidx (count @log)]
-      (logger/debugf "put-cmd!: id=%d, term=%d, rid=%s, lid=%d, lterm=%d, nidx=%s"
+      (logger/tracef "put-cmd!: id=%d, term=%d, rid=%s, lid=%d, lterm=%d, nidx=%s"
                      id term rid lid lterm nidx)
       (if (= lid (dec id))
         (dosync
@@ -116,14 +116,14 @@
     (let [[fid fterm] (first-id-term this)
           i (- id fid)
           clog (count @log)]
-      (logger/debugf "get-entry: id=%d, fid=%d, fterm=%d, i=%s, clog=%d"
+      (logger/tracef "get-entry: id=%d, fid=%d, fterm=%d, i=%s, clog=%d"
                      id fid fterm i clog)
       (when (and (not (neg? i)) (< i clog))
         (nth @log i))))
   (ltrim-log! [this last-id]
     (let [[fid fterm] (first-id-term this)
           ilast (- last-id fid)]
-      (logger/debugf "ltrim-log!: last-id=%d, fid=%d, fterm=%d, ilast=%d"
+      (logger/tracef "ltrim-log!: last-id=%d, fid=%d, fterm=%d, ilast=%d"
                      last-id fid fterm ilast)
       (if (and (>= ilast 0)
                (< ilast (count @log)))
@@ -134,7 +134,7 @@
   (rtrim-log! [this first-id]
     (let [[fid fterm] (first-id-term this)
           ilast+1 (- first-id fid)]
-      (logger/debugf "rtrim-log!: first-id=%d, fid=%d, fterm=%d, ilast+1=%d"
+      (logger/tracef "rtrim-log!: first-id=%d, fid=%d, fterm=%d, ilast+1=%d"
                      first-id fid fterm ilast+1)
       (if (and (>= ilast+1 0)
                (< ilast+1 (count @log)))
@@ -160,7 +160,7 @@
   (let [ref-val (deref vref)
         rvalue (expr)]
     (when-not (= ref-val (deref vref))
-      (logger/debugf "Value was changed.. Persisting %s to %s" @vref location)
+      (logger/tracef "Value was changed.. Persisting %s to %s" @vref location)
       (util/persist-obj location (deref vref)))
     rvalue))
 
@@ -212,7 +212,7 @@
   (post-cmd! [this term rid command]
     (let [[lid, lterm] (last-id-term this)
           nid (inc lid)]
-      (logger/debugf "post-cmd!: term=%d, rid=%s, lid=%d, lterm=%d, nid=%d"
+      (logger/tracef "post-cmd!: term=%d, rid=%s, lid=%d, lterm=%d, nid=%d"
                      term rid lid lterm nid)
       (try
         (j/with-db-transaction [c db]
@@ -223,7 +223,7 @@
   (put-cmd! [this id term rid command]
     (let [[lid lterm] (last-id-term this)
           nidx (inc lid)]
-      (logger/debugf "put-cmd!: id=%d, term=%d, rid=%s, lid=%d, lterm=%d, nidx=%s"
+      (logger/tracef "put-cmd!: id=%d, term=%d, rid=%s, lid=%d, lterm=%d, nidx=%s"
                      id term rid lid lterm nidx)
       (if (= lid (dec id))
         (do
@@ -239,12 +239,12 @@
   (get-entry [this id]
     (let [row (j/query db [(str "SELECT * from " table " WHERE id=?") id])
           element (first row)]
-      (logger/debugf "get-entry: id=%d" id)
+      (logger/tracef "get-entry: id=%d" id)
       (if element
         (update-in element [:command] read-string))))
   (ltrim-log! [this last-id]
     (let [entry (get-entry this last-id)]
-      (logger/debugf "ltrim-log!: last-id=%d, fid=%s, fterm=%s"
+      (logger/tracef "ltrim-log!: last-id=%d, fid=%s, fterm=%s"
                      last-id (:id entry) (:term entry) )
       (if (= last-id (:id entry))
         (do
@@ -254,7 +254,7 @@
         false)))
   (rtrim-log! [this first-id]
     (let [entry (get-entry this first-id)]
-      (logger/debugf "rtrim-log!: first-id=%d, fid=%s, fterm=%s"
+      (logger/tracef "rtrim-log!: first-id=%d, fid=%s, fterm=%s"
                      first-id (:id entry) (:term entry))
       (if-not (nil? entry)
         (do

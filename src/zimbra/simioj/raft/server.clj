@@ -247,7 +247,7 @@
   and maximum configuration settings."
   [{:keys [:election-timeout-min :election-timeout-max] :or {:election-timeout-min 150 :election-timeout-max 300}}]
   (let [tout (+ (rand-int (- election-timeout-max election-timeout-min)) election-timeout-min)]
-    (logger/debugf "rs-election-timeout-ms: tout=%s" tout)
+    (logger/tracef "rs-election-timeout-ms: tout=%s" tout)
     tout))
 
 
@@ -257,7 +257,7 @@
   "
   [{:keys [:id :election-config :server-state :timers]
     :as this}]
-  (logger/debugf "rs-start-timers!: id=%s, election-config=%s, state=%s"
+  (logger/tracef "rs-start-timers!: id=%s, election-config=%s, state=%s"
                  id election-config (:state @server-state))
   (let [state (:state @server-state)]
     (condp = state
@@ -303,7 +303,7 @@
   [{:keys [:election-config :id :leader-state :log :rpc :server-state :servers-config :timers]
     :as this}]
   ;; (cancel-timers! this)
-  (logger/debugf "rs-candidate!: id=%s, server-state=%s" id @server-state)
+  (logger/tracef "rs-candidate!: id=%s, server-state=%s" id @server-state)
   (let [leader (:leader @servers-config)
         voted-for (:voted-for @server-state)
         followers (disj (apply clojure.set/union
@@ -320,7 +320,7 @@
                                (->Vote new-term id lid lterm))
             num-success (count (filter :vote-granted (vals resp)))
             max-term (apply max (map :term (vals resp)))]
-        (logger/debugf "rs-candidate!: id=%s, new-term=%s, lid=%s, lterm=%s, num-succes=%s, max-term=%s, resp=%s"
+        (logger/tracef "rs-candidate!: id=%s, new-term=%s, lid=%s, lterm=%s, num-succes=%s, max-term=%s, resp=%s"
                        id new-term lid lterm num-success max-term resp)
         (if (< num-success min-quorum)
           (do
@@ -332,12 +332,12 @@
 (defn- rs-follower!
   "Implementation of the Election protocol follower! function
   for a RaftServer"
-  [{:keys [:election-config :id :timers :servers-config :server-state]
+  [{:keys [:election-config :id :log :timers :servers-config :server-state]
     :as this}]
+  (cancel-timers! this)
   (let [leader (:leader @servers-config)]
-    (cancel-timers! this)
-    (logger/debugf "rs-follower!: id=%s, leader=%s, server-state=%s"
-                   id leader @server-state)
+    (logger/tracef "rs-follower!: id=%s, leader=%s, server-state=%s, last-id-term=%s"
+                   id leader @server-state (last-id-term log))
     (if (and (= leader id)
              (not= (:state @server-state) :leader))
       (candidate! this)
@@ -360,27 +360,27 @@
             :servers-config :server-state :leader-state]
      :as this}]
    ;;(cancel-timers! this)
-   (logger/debugf "rs-leader!/1: id=%s, server-state=%s, leader-state=%s"
+   (logger/tracef "rs-leader!/1: id=%s, server-state=%s, leader-state=%s"
                   id @server-state @leader-state)
    (let [leader (:leader election-config)
          [lid lterm] (last-id-term log)
          commit-index (:commit-index @server-state)
          resp (command! this (generate-rid) nil)]
-     (logger/debugf "rs-leader!/1: id=%s, resp=%s" id resp)
+     (logger/tracef "rs-leader!/1: id=%s, resp=%s" id resp)
      (when (= (:status resp) :accepted)
        (start-timers! this))))
   ([{:keys [:id :log :rpc :election-config :timers
             :servers-config :server-state :leader-state]
      :as this} new-term]
    ;;(cancel-timers! this)
-   (logger/debugf "rs-leader!/2: id=%s, new-term=%s, server-state=%s, leader-state=%s"
+   (logger/tracef "rs-leader!/2: id=%s, new-term=%s, server-state=%s, leader-state=%s"
                   id new-term @server-state @leader-state)
    (dosync (alter server-state assoc
                   :current-term new-term
                   :state :leader
                   :voted-for id))
    (let [resp (command! this (generate-rid) nil)]
-     (logger/debugf "rs-leader!/2: id=%s, resp=%s" id resp)
+     (logger/tracef "rs-leader!/2: id=%s, resp=%s" id resp)
      (if (= (:status resp) :accepted)
        (start-timers! this)
        (follower! this)))))
@@ -405,7 +405,7 @@
            :prev-log-index :prev-log-term
            :entries :leader-commit]}]
   (cancel-timers! this)
-  (logger/debugf (str "rs-append-entries-1: id=%s, term=%s, leader-id=%s, "
+  (logger/tracef (str "rs-append-entries-1: id=%s, term=%s, leader-id=%s, "
                       "prev-log-index=%s, prev-log-term=%s, "
                       "entries=%s, leader-commit=%s")
                  id term leader-id prev-log-index prev-log-term
@@ -422,7 +422,7 @@
                                                      (when-not (= term sterm) (inc i))))
                                            (range sidx 0 -1))
                                      sidx))
-        _ (logger/debugf (str "rs-append-entries-2: id=%s servers-config=%s, "
+        _ (logger/tracef (str "rs-append-entries-2: id=%s servers-config=%s, "
                               "server-state=%s, current-term=%s, "
                               "commit-index=%s, pentry=%s, eentry=%s, "
                               "lid=%s, lterm=%s")
@@ -453,7 +453,7 @@
                                       :voted-for leader-id
                                       :last-leader-cmd-time (system-time-ms)
                                       :commit-index new-commit-index))
-                       (logger/debugf "rs-append-entries-3: id=%s, server-state=%s"
+                       (logger/tracef "rs-append-entries-3: id=%s, server-state=%s"
                                       id @server-state)
                        (rs-process-log! this)
                        {:term new-current-term
@@ -481,7 +481,7 @@
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
         min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))]
-    (logger/debugf "rs-command!-1: id=%s command?=%s commit-index=%s, current-term=%s, state=%s, voted-for=%s, followers=%s"
+    (logger/tracef "rs-command!-1: id=%s command?=%s commit-index=%s, current-term=%s, state=%s, voted-for=%s, followers=%s"
                    id (some? command) commit-index current-term state voted-for followers)
     (cond
       (= state :leader) (try
@@ -497,7 +497,7 @@
                                                                                    cmd
                                                                                    commit-index))
                                          {})
-                                _ (logger/debugf "rs-command!-2: id=%s, append-entries resp=%s" id resp)
+                                _ (logger/tracef "rs-command!-2: id=%s, append-entries resp=%s" id resp)
                                 num-success (count (filter :success (vals resp)))
                                 max-term (apply max (cons current-term (map :term (remove :success (vals resp)))))]
                             (cond
@@ -562,7 +562,7 @@
         {:keys [:election-timeout-min] :or {:election-timeout-min 0}} election-config
         [lid lterm] (last-id-term log)
         leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)]
-    (logger/debugf (str
+    (logger/tracef (str
                     "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
                     "last-log-index=%s, last-log-term=%s, current-term=%s, "
                     "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
