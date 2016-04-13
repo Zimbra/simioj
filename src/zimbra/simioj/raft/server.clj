@@ -348,11 +348,10 @@
 
 
 (defn- rs-leader!
-    "The arity/1 function trigers the leader to broadcast an
+  "The arity/1 function trigers the leader to broadcast an
      empty append-entries RPC to all of its follows if normal
      Raft election is being used.  If configured Raft election is
-     being used this is a noop. TODO - change to honor new
-     `leader affinity`.
+     being used this is a noop.
     The arity/2 function is called when a :candidate wins an
     election and needs to transition to :leader state."
 
@@ -561,27 +560,29 @@
         {:keys [:leader]} @servers-config
         {:keys [:election-timeout-min] :or {:election-timeout-min 0}} election-config
         [lid lterm] (last-id-term log)
-        leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)]
+        leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)
+        resp (if (and (<= current-term term)
+                      (or (< lterm last-log-term) (and (= lterm last-log-term)
+                                                       (<= lid last-log-index)))
+                      (or (= candidate-id leader)
+                          (and (or (nil? voted-for)
+                                   (= voted-for candidate-id))
+                               (< election-timeout-min leader-cmd-time-elapsed))))
+               (do (dosync (alter server-state assoc
+                                  :current-term term
+                                  :voted-for candidate-id))
+                   {:term term :vote-granted true})
+               {:term current-term :vote-granted false})]
     (logger/tracef (str
                     "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
                     "last-log-index=%s, last-log-term=%s, current-term=%s, "
                     "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
-                    "leader=%s, leader-cmd-time-elapsed=%s")
+                    "leader=%s, leader-cmd-time-elapsed=%s, resp=%s")
                    id term candidate-id last-log-index last-log-term
                    current-term last-leader-cmd-time voted-for lid lterm
-                   leader leader-cmd-time-elapsed)
-    (if (and (<= current-term term)
-             (or (< lterm last-log-term) (and (= lterm last-log-term)
-                                              (<= lid last-log-index)))
-             (or (= candidate-id leader)
-                 (and (or (nil? voted-for)
-                          (= voted-for candidate-id))
-                      (< election-timeout-min leader-cmd-time-elapsed))))
-      (do (dosync (alter server-state assoc
-                         :current-term term
-                         :voted-for candidate-id))
-          {:term term :vote-granted true})
-      {:term current-term :vote-granted false})))
+                   leader leader-cmd-time-elapsed resp)
+    resp))
+
 
 
 (def rs-basicraft-raftprotocol

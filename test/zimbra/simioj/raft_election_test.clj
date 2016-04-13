@@ -100,8 +100,8 @@
     ;; start :s1 and :s2 with larger election timeouts to guarantee that :s0
     ;; wins initial election
     (let [sc {:servers [#{:s0 :s1 :s2}]}
-          ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
-          ecf {:broadcast-timeout 10 :election-timeout-min 300 :election-timeout-max 600}
+          ec {:broadcast-timeout 100 :election-timeout-min 500 :election-timeout-max 1000}
+          ecf {:broadcast-timeout 100 :election-timeout-min 1000 :election-timeout-max 1500}
           s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
@@ -115,14 +115,24 @@
                            :commit-index 0 :last-applied 0}
                           {})]
       (dorun (map follower! [s0 s1 s2]))
-      (Thread/sleep 2000)
-      ;; ensure :s0 won leadership initially
+      (Thread/sleep 1000)
+      ;; (println "----- Server States 1 -----")
+      ;; (doseq [s [s0 s1 s2]]
+      ;;   (printf "Server=%s, State=%s\n"
+      ;;           (:id s) @(:server-state s))
+      ;;   (flush))
+      ;; Ensure :s0 won leadership initially
       (is (= :leader (:state @(:server-state s0))))
       (is (= :follower (:state @(:server-state s1))))
       (is (= :follower (:state @(:server-state s2))))
-      ;; update :s2's servers-config
-      (dosync (ref-set (:servers-config s2) (assoc sc :leader :s2)))
-      (Thread/sleep 4000)
+      ;; update servers-config to turn on configured election
+      (dorun (map #(dosync (ref-set (:servers-config %) (assoc sc :leader :s2))) [s0 s1 s2]))
+      (Thread/sleep 3000)
+      ;; (println "----- Server States 2 -----")
+      ;; (doseq [s [s0 s1 s2]]
+      ;;   (printf "Server=%s, State=%s\n"
+      ;;           (:id s) @(:server-state s))
+      ;;   (flush))
       ;; ensure :s2 reclaimed leadership
       (is (= :follower (:state @(:server-state s0))))
       (is (= :follower (:state @(:server-state s1))))
