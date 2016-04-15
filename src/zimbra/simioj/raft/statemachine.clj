@@ -35,7 +35,7 @@
      to do so.  The state machine that processes :set-config commands
      it the primary one that needs to run.  Then, after it has replicated
      the command to its followers, the process-log! must be invoked again
-     to allow log entries that are not commited to be processed.
+     to allow log entries that are now commited to be processed.
 
      Therefore, when implementing a state machine, the first thing it
      should do is check to see if it is allowed to run by comparing
