@@ -167,7 +167,7 @@
                           (assoc @topology :nodes nodes)
                           expected-nodes
                           quorum-timeout eviction-time)]
-        (logger/debugf "CD-DISCOVERY-LOOP: id=%s; OLD: cluster?=%s, nodes=%s; NEW: cluster?=%s, nodes=%s"
+        (logger/tracef "CD-DISCOVERY-LOOP: id=%s; OLD: cluster?=%s, nodes=%s; NEW: cluster?=%s, nodes=%s"
                        (:id @topology) (:have-cluster? @topology) old-avail-ids (:have-cluster? new-topology) (keys nodes))
         (when (or (not= (:have-cluster? @topology) (:have-cluster? new-topology))
                   (not= (keys nodes) old-avail-ids))

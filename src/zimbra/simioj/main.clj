@@ -2,11 +2,14 @@
   (:require [clojure.string :as string]
             [clojure.tools.cli :refer [parse-opts]]
             [clojure.tools.logging :as logging]
-            [zimbra.simioj.config :as config])
+            [zimbra.simioj.config :as config]
+            [zimbra.simioj.endpoint.http :as endpoint]
+            [zimbra.simioj.raft.server :refer :all])
   (:gen-class))
 
 
 (defn- ^:no-doc build-config [options]
+  (logging/debugf "build-config: options=%s" options)
   (let [config-base (if (:replace-config options)
                       (apply config/load-cfg-files! (clojure.string/split
                                                      (:replace-config options) #","))
@@ -52,14 +55,11 @@
   "Handles the 'start' command"
   [options]
   (let [config (build-config options)
-        rpc {} ; TODO
-        raft {} ; TODO
+        raft (make-raft-from-config (:raft config))
         ctx (ref {:config config
-                  :rpc rpc
                   :raft raft})]
-    ;; TODO - start services
-    (clojure.pprint/pprint @ctx)))
-
+    (endpoint/start! ctx)
+    (follower! raft)))
 
 (defn usage [options-summary]
   (string/join

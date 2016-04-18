@@ -44,23 +44,16 @@
              ;; (1) we have discovered expected-nodes, or
              ;; (2) we have quorum and quorum-timeout milliseconds have elapsed
              :quorum-timeout 30000}
- ;;; Configuration for the cluster-wide Raft that is responsible
- ;;; for reliable replication of shard allocation and node topology
- :cluster-raft {;; Raft log implementation (:sqlite, :memory)
-                :log :sqlite
-                ;; Additional statemachines to be configured
-                ;; for the :cluster-raft.
-                ;; keys should be a keyword to use for an identifier
-                ;; values should be fully-qualified classes
-                :statemachines {}
-                }
- ;;; Configuration for the shard "micro" rafts that are responsible
- ;;; for replication of metadata and events
- :shard-raft {;; Raft loc implementation (:sqlite, :memory)
-              :log :sqlite
-              ;; Additional statemachines to be configured
-              ;; for the :shard-rafts.
-              ;; keys should be a keyword to use for an identifier
-              ;; values should be fully-qualified classes
-              :statemachines {}
-              }}
+ ;;; Configuration for the Raft that will be started by the API
+ :raft {;; Raft log implementation (:sqlite, :memory)
+        :log {:type :sqlite :args {}}
+        ;; Initial server-config.  :servers is a vector that may contain
+        ;; 0, 1, or 2 sets of server IDs; e.g., [#{:s0 :s1 :s2}]
+        :server-config {:servers []}
+        ;; Initial server-state
+        :server-state {}
+        ;; Additional statemachines to be configured
+        ;; keys should be a keyword to use for an identifier
+        ;; values should be fully-qualified classes
+        :statemachines {}
+        }}
