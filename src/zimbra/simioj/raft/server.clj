@@ -225,10 +225,10 @@
            :servers-config :server-state :leader-state]
     :as this}]
   (let [state-machines (:state-machines @servers-config)
-        {:keys [:last-applied :commit-index]} @server-state
+        {:keys [:last-applied :commit-index] :or {:last-applied {} :commit-index 0}} @server-state
         new-last-applied (into {}
-                               (map (fn [smid sm]
-                                      (let [la (last-applied smid)
+                               (map (fn [[smid sm]]
+                                      (let [la (last-applied smid 0)
                                             nla (process-log! sm log commit-index la)]
                                         [smid nla])) state-machines))]
     (dosync (alter server-state assoc :last-applied new-last-applied))))
@@ -264,21 +264,27 @@
       :follower (let [follower-timer (future (Thread/sleep (rs-election-timeout-ms election-config))
                                              (try
                                                (candidate! this)
+                                               (catch InterruptedException ie
+                                                 (logger/tracef "follower election timeout exception: id=%s, ex=%s" id ie))
                                                (catch Exception e
-                                                 (logger/warnf "follower election timeout exception: id=%s, ex=%s" id e))))]
+                                                 (logger/warnf e "follower election exception: id=%s, ex=%s" id e))))]
                   (dosync
                    (ref-set timers {:follower follower-timer})))
       :candidate (let [candidate-timer (future (Thread/sleep (rs-election-timeout-ms election-config))
                                                (try
                                                  (candidate! this)
+                                               (catch InterruptedException ie
+                                                 (logger/tracef "candidate election timeout exception: id=%s, ex=%s" id ie))
                                                  (catch Exception e
-                                                   (logger/warnf "candidate election timeout exception: id=%s, ex=%s" id e))))]
+                                                   (logger/warnf e "candidate election exception: id=%s, ex=%s" id e))))]
                    (dosync (ref-set timers {:candidate candidate-timer})))
       :leader (let [leader-timer (future (Thread/sleep (rs-broadcast-timeout-ms election-config))
                                          (try
                                            (leader! this)
+                                           (catch InterruptedException ie
+                                             (logger/tracef "leader broadcast timeout exception: id=%s, ex=%s" id ie))
                                            (catch Exception e
-                                             (logger/warnf "leader broadcast timeout exception: id=%s, ex=%s" id e))))]
+                                             (logger/warnf e "leader broadcast exception: id=%s, ex=%s" id e))))]
                 (dosync (ref-set timers {:leader leader-timer})))
       nil)))
 
@@ -307,19 +313,21 @@
   (let [leader (:leader @servers-config)
         voted-for (:voted-for @server-state)
         followers (disj (apply clojure.set/union
-                               (:servers @servers-config)) id)]
-    (let [new-term (inc (:current-term @server-state))]
+                               (:servers @servers-config)) id)
+        followers? (pos? (count followers))]
+    (let [new-term (inc (:current-term @server-state 0))]
       (dosync (alter server-state assoc
                      :state :candidate
                      :current-term new-term
                      :voted-for nil))
-      (let [min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))
+      (let [min-quorum (if followers? (quot (count followers) 2) 0)
             [lid lterm] (last-id-term log)
             resp (request-vote rpc
                                followers
                                (->Vote new-term id lid lterm))
-            num-success (count (filter :vote-granted (vals resp)))
-            max-term (apply max (map :term (vals resp)))]
+            _ (logger/debugf "rs-candidate! id=%s, request-vote-resp=%s" id resp)
+            num-success (if followers? (count (filter :vote-granted (vals resp))) 0)
+            max-term (if followers? (apply max (map :term (vals resp))) 0)]
         (logger/tracef "rs-candidate!: id=%s, new-term=%s, lid=%s, lterm=%s, num-succes=%s, max-term=%s, resp=%s"
                        id new-term lid lterm num-success max-term resp)
         (if (< num-success min-quorum)
@@ -411,7 +419,7 @@
                  entries leader-commit)
 
   (let [state-machines (:state-machines @servers-config)
-        {:keys [:current-term :commit-index]} @server-state
+        {:keys [:current-term :commit-index] :or {:current-term 0 :commit-index 0}} @server-state
         pentry (get-entry log prev-log-index)
         eentry (get-entry log (inc prev-log-index))
         [lid lterm] (last-id-term log)
@@ -474,7 +482,7 @@
     :as this}
    rid command]
 
-  (let [{:keys [:commit-index :current-term :state :voted-for]} @server-state
+  (let [{:keys [:commit-index :current-term :state :voted-for] :or {:commit-index 0 :current-term 0}} @server-state
         state-machines (:state-machines @servers-config)
         followers (seq (disj (apply clojure.set/union (:servers @servers-config)) id))
         ;; we implicitly include ourself in the quorum, so this is just the remaining
@@ -508,10 +516,10 @@
                               (< num-success min-quorum) {:status :unavailable :server id}
                               :else (do
                                       (dosync (alter server-state assoc :commit-index new-id))
-                                      (rs-process-log! this)
+                                      (and command (rs-process-log! this))
                                       {:status :accepted :server id})))
                           (catch IllegalArgumentException iae
-                            (logger/warnf "rs-command!: id=%s Exception: %s" id iae)
+                            (logger/warnf iae "rs-command!: id=%s Exception: %s" id iae)
                             {:status :conflict :server id}))
       :else {:status :moved :server voted-for})))
 
@@ -556,11 +564,19 @@
            :servers-config :server-state :leader-state]
     :as this}
    {:keys [:term :candidate-id :last-log-index :last-log-term]}]
-  (let [{:keys [:current-term :voted-for :last-leader-cmd-time] :or {:last-leader-cmd-time 0}} @server-state
+  (let [{:keys [:current-term :voted-for :last-leader-cmd-time] :or {:current-term 0 :last-leader-cmd-time 0}} @server-state
         {:keys [:leader]} @servers-config
         {:keys [:election-timeout-min] :or {:election-timeout-min 0}} election-config
         [lid lterm] (last-id-term log)
         leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)
+        _ (logger/debugf (str
+                          "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
+                          "last-log-index=%s, last-log-term=%s, current-term=%s, "
+                          "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
+                          "leader=%s, leader-cmd-time-elapsed=%s")
+                         id term candidate-id last-log-index last-log-term
+                         current-term last-leader-cmd-time voted-for lid lterm
+                         leader leader-cmd-time-elapsed)
         resp (if (and (<= current-term term)
                       (or (< lterm last-log-term) (and (= lterm last-log-term)
                                                        (<= lid last-log-index)))
@@ -573,14 +589,7 @@
                                   :voted-for candidate-id))
                    {:term term :vote-granted true})
                {:term current-term :vote-granted false})]
-    (logger/tracef (str
-                    "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
-                    "last-log-index=%s, last-log-term=%s, current-term=%s, "
-                    "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
-                    "leader=%s, leader-cmd-time-elapsed=%s, resp=%s")
-                   id term candidate-id last-log-index last-log-term
-                   current-term last-leader-cmd-time voted-for lid lterm
-                   leader leader-cmd-time-elapsed resp)
+    (logger/debugf "rs-request-vote: id=%s, resp=%s" id resp)
     resp))
 
 
@@ -707,3 +716,23 @@
 ;; (defmethod make-raft :memory [{:keys [:local] :as cfg} rpc]
 ;;   (let [id (config/local-node-id cfg)
 ;;         log (make-memory-log)]))
+
+(defn make-raft-from-config
+  [{:keys [:id :log :election-config :leader-state
+           :rpc :servers-config :server-state]}]
+  (logger/debugf "make-raft-from-config: id=%s, log=%s, election-config=%s, leader-state=%s, rpc=%s, servers-config=%s, server-state=%s"
+                 id log election-config leader-state rpc servers-config server-state)
+  (let [log (apply (resolve (symbol (:fn log))) (:args log))
+        rpc (apply (resolve (symbol (:fn rpc))) (:args rpc))
+        machines (into {} (map
+                           (fn [[id {:keys [:fn :args]}]]
+                             [id (apply (resolve (symbol fn)) (map eval args))])
+                           (:state-machines servers-config)))]
+    (RaftServer. id
+                 log
+                 rpc
+                 election-config
+                 (ref {})
+                 (ref (assoc servers-config :state-machines machines))
+                 (ref server-state)
+                 (ref leader-state))))

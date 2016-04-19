@@ -51,4 +51,9 @@
       (is (zero? last-applied-0))
       (is (= last-applied-3 3))
       (is (= (first @cb-state) {:oid 1 :val nil}))
-      (is (= (second @cb-state) {:oid 1 :val {:name "widgetmaker" :city "houston" :employees 100}})))))
+      (is (= (second @cb-state) {:oid 1 :val {:name "widgetmaker" :city "houston" :employees 100}}))
+      (is (= (post-cmd! log 1 114 [:patch {:oid 1
+                                           :upsert {}
+                                           :ops [#(update-in % [:employees] + 10)]}]) 4))
+      (process-log! sm log 4 last-applied-3)
+      (is (= (get-state sm 1) {:name "widgetmaker" :city "houston" :employees 110})))))

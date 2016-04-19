@@ -1,5 +1,6 @@
 {:node {:config-dir "test-data/conf"
         :log-dir "test-data/log"
         :data-dir "test-data/data"}
- :cluster-raft {:log :memory}
- :shard-raft {:log :memory}}
+ :raft {:log {:type :memory :args {}}
+        :server-config {:servers []}
+        :server-state {}}}

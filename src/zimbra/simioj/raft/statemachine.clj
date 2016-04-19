@@ -4,7 +4,7 @@
             [clojure.tools.logging :as logger]
             [clojure.tools.reader.edn :as edn]
             [zimbra.simioj [actor :refer :all]]
-            [zimbra.simioj.raft.log :refer :all] ; [first-id-term last-id-term Log]]
+            [zimbra.simioj.raft.log :refer :all]
             [zimbra.simioj.util :as util])
   (:gen-class))
 
@@ -35,7 +35,7 @@
      to do so.  The state machine that processes :set-config commands
      it the primary one that needs to run.  Then, after it has replicated
      the command to its followers, the process-log! must be invoked again
-     to allow log entries that are not commited to be processed.
+     to allow log entries that are now commited to be processed.
 
      Therefore, when implementing a state machine, the first thing it
      should do is check to see if it is allowed to run by comparing
@@ -87,7 +87,7 @@
 (defmulti msm-process-log-command!
   "Used by MemoryStateMachine instance to process log commands
    Parameters:
-     my-cmd - the command my instance is interested ing
+     my-cmd - the command my instance is interested in
      idx - the log index
      cmd-key - the command to be processed; e.g., :noop, :set-config, :patch
      cmd-val - the value associated with the command
@@ -105,7 +105,8 @@
     (if (= my-cmd cmd-key)
       (let [{:keys [:oid :ops :upsert]} cmd-val
             res-old (@cache oid)
-            res-new (or (reduce (fn [r f] (f r)) (or res-old upsert) ops) res-old)]
+            res-new (or (reduce (fn [r f]
+                                  ((if (fn? f) f (eval f)) r)) (or res-old upsert) ops) res-old)]
         (if (not= res-old res-new)
           (do
             (dosync (alter cache assoc oid res-new))
@@ -141,7 +142,7 @@
 (deftype MemoryStateMachine [cmd cache listeners]
   StateMachine
   (process-log! [this log commit-index last-applied]
-    (logger/debugf "process-log!: cmd=%s, commit-index=%s, last=applied=%s"
+    (logger/tracef "process-log!: cmd=%s, commit-index=%s, last=applied=%s"
                 cmd commit-index last-applied)
     (let [[lidx lterm] (last-id-term log)
           examine-indices (range (inc last-applied) (inc lidx))]
