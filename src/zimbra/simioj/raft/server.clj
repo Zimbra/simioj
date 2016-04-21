@@ -720,7 +720,8 @@
 (defn make-raft-from-config
   [{:keys [:id :log :election-config :leader-state
            :rpc :servers-config :server-state]}]
-  (logger/debugf "make-raft-from-config: id=%s, log=%s, election-config=%s, leader-state=%s, rpc=%s, servers-config=%s, server-state=%s"
+  (logger/debugf (str "make-raft-from-config: id=%s, log=%s, election-config=%s, "
+                      "leader-state=%s, rpc=%s, servers-config=%s, server-state=%s")
                  id log election-config leader-state rpc servers-config server-state)
   (let [log (apply (resolve (symbol (:fn log))) (:args log))
         rpc (apply (resolve (symbol (:fn rpc))) (:args rpc))
