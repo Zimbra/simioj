@@ -27,7 +27,7 @@ Recommend adding the following to `$HOME/.lein/profiles.clj`:
                       [lein-kibit "0.1.2"]
                       [lein-cloverage "1.0.6"]
                       [lein-bikeshed "0.3.0"]
-                      [jonase/eastwood "0.2.3" :exclusions [org.clojure/cojure]]
+                      [jonase/eastwood "0.2.3" :exclusions [org.clojure/clojure]]
                       [lein-bin "0.3.5"]]}}
 
 Then, before committing any work, run the following and fix any issues
