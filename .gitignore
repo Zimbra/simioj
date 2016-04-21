@@ -14,5 +14,5 @@
 /test-data
 pom.xml
 pom.xml.asc
-/parser.out
-/parsetab.py
+parser.out
+parsetab.py
