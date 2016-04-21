@@ -8,45 +8,36 @@
             [zimbra.simioj.raft [rpc :refer :all]]))
 
 
-(def raft-servers (ref {}))
-(def raft-rpc (->TestRpc raft-servers))
-
 
 (defn- register-server
   "Register a SERVER with ID to the pool that is managed by the
   RAFT-RPC"
-  [id server]
+  [raft-servers id server]
   (dosync (alter raft-servers assoc id server))
   server)
 
-(defn- reset-server-registry
-  "Call this at the beginning of every deftest that uses raft-rpc to
-  reset the raft-servers ref."
-  []
-  (dosync (ref-set raft-servers {})))
-
-
-(defn- make-server [id log rpc ec sc ss ls]
-  (register-server id (make-simple-raft-server id log rpc ec sc ss ls)))
+(defn- make-server [raft-servers id log rpc ec sc ss ls]
+  (register-server raft-servers id (make-simple-raft-server id log rpc ec sc ss ls)))
 
 (deftest candidate-test
   (testing "candidate! with basic 3 server raft cluster"
-    (reset-server-registry)
-    (let [sc {:servers [#{:s0 :s1 :s2}]}
+    (let [raft-servers (ref {})
+          raft-rpc (->TestRpc raft-servers)
+          sc {:servers [#{:s0 :s1 :s2}]}
           ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
-          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
-                                  {:state :leader :current-term 1 :voted-for :s0
-                                   :commit-index 0 :last-applied 0}
-                                  {:s1 {:next-index 1 :match-index 0}
-                                   :s2 {:next-index 1 :match-index 0}})
-          s1 (make-server :s1 (make-memory-log) raft-rpc ec sc
-                                  {:state :follower :current-term 1 :voted-for :s0
-                                   :commit-index 0 :last-applied 0}
-                                  {})
-          s2 (make-server :s2 (make-memory-log) raft-rpc ec sc
-                                  {:state :follower :current-term 1 :voted-for :s0
-                                   :commit-index 0 :last-applied 0}
-                                  {})]
+          s0 (make-server raft-servers :s0 (make-memory-log) raft-rpc ec sc
+                          {:state :leader :current-term 1 :voted-for :s0
+                           :commit-index 0 :last-applied 0}
+                          {:s1 {:next-index 1 :match-index 0}
+                           :s2 {:next-index 1 :match-index 0}})
+          s1 (make-server raft-servers :s1 (make-memory-log) raft-rpc ec sc
+                          {:state :follower :current-term 1 :voted-for :s0
+                           :commit-index 0 :last-applied 0}
+                          {})
+          s2 (make-server raft-servers  :s2 (make-memory-log) raft-rpc ec sc
+                          {:state :follower :current-term 1 :voted-for :s0
+                           :commit-index 0 :last-applied 0}
+                          {})]
       (dorun (map start-timers! [s0 s1 s2]))
       ;; first, establish s0 as :leader by sending out :noop
       (println (command! s0 "r1" [:noop {}])) (flush)
@@ -59,19 +50,20 @@
 
 (deftest three-server-election-test
   (testing "test pure election with three servers"
-    (reset-server-registry)
-    (let [sc {:servers [#{:s0 :s1 :s2}]}
+    (let [raft-servers (ref {})
+          raft-rpc (->TestRpc raft-servers)
+          sc {:servers [#{:s0 :s1 :s2}]}
           ec {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
-          ecf {:broadcast-timeout 10 :election-timeout-min 3000 :election-timeout-max 6000}
-          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
+          ecf {:broadcast-timeout 10 :election-timeout-min 300 :election-timeout-max 600}
+          s0 (make-server raft-servers :s0 (make-memory-log) raft-rpc ec sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})
-          s1 (make-server :s1 (make-memory-log) raft-rpc ec sc
+          s1 (make-server raft-servers :s1 (make-memory-log) raft-rpc ec sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})
-          s2 (make-server :s2 (make-memory-log) raft-rpc ec sc
+          s2 (make-server raft-servers :s2 (make-memory-log) raft-rpc ec sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})]
@@ -96,21 +88,22 @@
 
 (deftest three-server-configured-election-test
   (testing "test configured election"
-    (reset-server-registry)
     ;; start :s1 and :s2 with larger election timeouts to guarantee that :s0
     ;; wins initial election
-    (let [sc {:servers [#{:s0 :s1 :s2}]}
+    (let [raft-servers (ref {})
+          raft-rpc (->TestRpc raft-servers)
+          sc {:servers [#{:s0 :s1 :s2}]}
           ec {:broadcast-timeout 100 :election-timeout-min 500 :election-timeout-max 1000}
           ecf {:broadcast-timeout 100 :election-timeout-min 1000 :election-timeout-max 1500}
-          s0 (make-server :s0 (make-memory-log) raft-rpc ec sc
+          s0 (make-server raft-servers :s0 (make-memory-log) raft-rpc ec sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})
-          s1 (make-server :s1 (make-memory-log) raft-rpc ecf sc
+          s1 (make-server raft-servers :s1 (make-memory-log) raft-rpc ecf sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})
-          s2 (make-server :s2 (make-memory-log) raft-rpc ecf sc
+          s2 (make-server raft-servers :s2 (make-memory-log) raft-rpc ecf sc
                           {:current-term 0
                            :commit-index 0 :last-applied 0}
                           {})]
