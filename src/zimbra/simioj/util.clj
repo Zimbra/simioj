@@ -5,6 +5,26 @@
             [clojure.java.io :as io]
             [clojure.java.jdbc :as j]))
 
+(defn init-directories
+  "Given a node or raft server ID and a BASE-DIRECTORY-PATH, construct absolute
+  path that is comprised of the combination of the base path with the
+  ID (sanitizing the ID first) and ensure that directories exists.
+  For all keywords included in SUBDIRS (if any), creates subdirectories
+  corresponding to the (sanitized) keywords.
+  Returns a map.
+  For every keyword in SUBDIRS there are entries in the
+  map that is returned, one for each subdirectory.
+"
+  [base-directory-path id & subdirs]
+  (let [sanitize-keyword (fn [kw] (clojure.string/replace kw ":" ""))
+        id-safe (sanitize-keyword id)
+        id-path (.getAbsolutePath (io/file base-directory-path id-safe))]
+    (io/make-parents id-path ".")
+    (reduce (fn [m sd]
+              (let [sd-path (.getAbsolutePath (io/file id-path (sanitize-keyword sd)))]
+                (io/make-parents sd-path ".")
+                (assoc m sd sd-path))) {} subdirs)))
+
 (defn persist-obj
   "Persist any object to disk.
   By default uses EDN format but accepts serializer function

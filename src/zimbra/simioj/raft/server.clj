@@ -129,16 +129,30 @@
        [:event {:oid <objectid> (real or virtual)
                 :eid <event-id>
                 :op :push | :pop
-                :payload {}}
-       NOTE: Configuration updates are apply by server immediately upon
-             receipt, before committing.  :new config is optional and is
-             used only during state transitions.
-       This command will update the :servers-config value.  Only keys that are present in the maps
-       will be affected.  Currently that means:
-         :servers - a vector of one or more sets of Raft server identifiers.
-         :state-machines - a sequence of state machines instances
-       [:set-config <new-configuration-map>]
+                :payload {}}]
+       Instructions to the leader for changing the set of servers that belong
+       in the Raft are done via a special command.  A :set-config command is
+       sent to the leader.  It should have this form:
+         [:set-config [<new-server-identifiers-set>]]
+       Prior to storing this log entry, the :leader must process it as follows:
 
+       Compare it's current :servers set with the new servers set.  If they
+          are different:
+       1. Update the :set-config command as follows:
+          [:set-config [<current-server-identifiers-set> <new-server-identifiers-set>]]
+       2. It updates its current :servers with the new value and stores it in the log.
+       3. It replicates the log entry to the followers using the union of the two sets
+          for concensus.
+       4. As soon as that log entry has been committed, the leader should
+          then construct a new :set-config command itself and store/replicate.  This
+          new command would look like this:
+          [:set-config [<new-server-identifiers-set>]]
+       5. It would update its own :server-state immediately and replicate it.
+       NOTE: Configuration updates are apply by server immediately upon
+             receipt, before committing.  The values in the vector are sets of server
+             ids for all servers that are members of the Raft cluster.  During
+             normal operations there will be only one value in the vector. During
+             a topology change there will be two values.
     ")
   (get-machine-state [this machine] [this machine resource-id] [this machine resource-id default]
     "Retrieve the computed state of the StateMachine identified
@@ -193,7 +207,82 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Server Implementation
+;;;; StateMachine functions
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defn- rsm-process-set-config! [{:keys [:server-state] :as this} command]
+  (if (and command
+           (= (first command) :set-config))
+    (let [old-servers (:servers @server-state)
+          new-servers (second command)
+          state-changed? (not= old-servers new-servers)]
+      (when state-changed?
+        (dosync (alter server-state assoc :servers new-servers))
+        (notify-state-changed this [:config :set-config] old-servers new-servers))
+      {:applied? true
+       :state-changed? state-changed?
+       :old-state old-servers
+       :new-state new-servers})
+    {:applied? false
+     :state-changed? false}))
+
+
+(defn- rsm-process-command! [{:keys [:servers-config] :as this} command]
+  (if command
+    (let [cmd-id (first command)
+          {:keys [:state-processors] :or {:state-processors {}}} servers-config
+          updated (filter
+                   (fn [[spid spr]] (:state-changed? spr))
+                   (map (fn [[spid spi]] [spid (process-command! spi command)]) state-processors))
+          state-changed? (not-empty updated)
+          old-state (into {} (map (fn [[spid spr]] [spid (:old-state spr)]) updated))
+          new-state (into {} (map (fn [[spid spr]] [spid (:new-state spr)]) updated))]
+      (dorun (map (fn [[spid spr]] (notify-state-changed this [spid cmd-id] (:old-state spr) (:new-state spr)))
+                  updated))
+      {:applied? true
+       :state-changed? state-changed?
+       :old-state old-state
+       :new-state new-state})
+    {:applied? false
+     :state-changed? false}))
+
+
+(defn- rsm-get-state
+  "Since this high-level StateMachine may contain multiple embedded state machine
+  processors, each with their own state-machine-processor-id, the RESOURCE-ID argument
+  is expectd to be a vector of the form [<state-machine-processor-id> <resource-id>]."
+  ([{:keys [:servers-config] :as this}]
+   (let [{:keys [:state-processors] :or {:state-processors {}}} servers-config]
+     (into {} (map (fn [[spid spi]] [spid (get-state spi)]) state-processors))))
+  ([this resource-id] (get-state this resource-id nil))
+  ([{:keys [:servers-config] :as this} [spid resource-id] default]
+   (let [{:keys [:state-processors] :or {:state-processors {}}} servers-config
+         spi (state-processors spid)]
+     (if spi (get-state spi resource-id default)
+         default))))
+
+
+(defn- rsm-notify-state-changed [{:keys [:servers-config] :as this}
+                                 [spid command-id] old-state new-state]
+  (let [{:keys [:state-change-listeners] :or {:state-change-listeners {}}} servers-config
+        notify-fns (state-change-listeners spid [])]
+    (dorun (map #(% command-id old-state new-state) notify-fns))))
+
+
+(def rsm-state-machine
+  "Map of StateMachine functions for the RaftStateMachine"
+  {:process-set-config! rsm-process-set-config!
+   :process-command! rsm-process-command!
+   :get-state rsm-get-state})
+
+(def rsm-state-changed-notifier
+  "Map of StateChangedNotifier functions for the RaftStateMachine"
+  {:notify-state-changed rsm-notify-state-changed})
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Raft Server Implementation
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
@@ -208,30 +297,21 @@
   (str (java.util.UUID/randomUUID)))
 
 
-(defn- rs-get-state-machine
-  "Helper function for RaftServer that will return the requested
-  state machine (by MACHINE identifier)."
-  [machine servers-config server-state]
-  (let [{:keys [:state :voted-for]} @server-state
-        sm ((:state-machines @servers-config) machine)]
-    (cond
-      (not= state :leader) [{:status :moved :server voted-for :state nil} nil]
-      (nil? sm) [{:status :not-found :server voted-for :state nil} nil]
-      :else [{:status :ok :server voted-for} sm])))
-
 (defn- rs-process-log!
-  "Have all registered statemachines process the log."
+  "Apply all committed log entries to the state machine, starting
+  with :last-applied + 1."
   [{:keys [:log :rpc :election-config :timers
            :servers-config :server-state :leader-state]
     :as this}]
-  (let [state-machines (:state-machines @servers-config)
-        {:keys [:last-applied :commit-index] :or {:last-applied {} :commit-index 0}} @server-state
-        new-last-applied (into {}
-                               (map (fn [[smid sm]]
-                                      (let [la (last-applied smid 0)
-                                            nla (process-log! sm log commit-index la)]
-                                        [smid nla])) state-machines))]
-    (dosync (alter server-state assoc :last-applied new-last-applied))))
+  (let [{:keys [:last-applied :commit-index] :or {:last-applied 0 :commit-index 0}} @server-state]
+    (loop [next-to-apply (inc last-applied)
+           entry (get-entry log next-to-apply)]
+      (if (and (<= next-to-apply commit-index)
+               (some? entry))
+        (do
+          (process-command! this (:command entry))
+          (recur (inc next-to-apply) (get-entry log (inc next-to-apply))))
+        (dosync (alter server-state assoc :last-applied (dec next-to-apply)))))))
 
 
 (defn- rs-broadcast-timeout-ms
@@ -310,10 +390,10 @@
     :as this}]
   ;; (cancel-timers! this)
   (logger/tracef "rs-candidate!: id=%s, server-state=%s" id @server-state)
-  (let [leader (:leader @servers-config)
+  (let [leader (:leader @server-state)
         voted-for (:voted-for @server-state)
         followers (disj (apply clojure.set/union
-                               (:servers @servers-config)) id)
+                               (:servers servers-config)) id)
         followers? (pos? (count followers))]
     (let [new-term (inc (:current-term @server-state 0))]
       (dosync (alter server-state assoc
@@ -343,7 +423,7 @@
   [{:keys [:election-config :id :log :timers :servers-config :server-state]
     :as this}]
   (cancel-timers! this)
-  (let [leader (:leader @servers-config)]
+  (let [leader (:leader @server-state)]
     (logger/tracef "rs-follower!: id=%s, leader=%s, server-state=%s, last-id-term=%s"
                    id leader @server-state (last-id-term log))
     (if (and (= leader id)
@@ -369,8 +449,7 @@
    ;;(cancel-timers! this)
    (logger/tracef "rs-leader!/1: id=%s, server-state=%s, leader-state=%s"
                   id @server-state @leader-state)
-   (let [leader (:leader election-config)
-         [lid lterm] (last-id-term log)
+   (let [[lid lterm] (last-id-term log)
          commit-index (:commit-index @server-state)
          resp (command! this (generate-rid) nil)]
      (logger/tracef "rs-leader!/1: id=%s, resp=%s" id resp)
@@ -418,8 +497,7 @@
                  id term leader-id prev-log-index prev-log-term
                  entries leader-commit)
 
-  (let [state-machines (:state-machines @servers-config)
-        {:keys [:current-term :commit-index] :or {:current-term 0 :commit-index 0}} @server-state
+  (let [{:keys [:current-term :commit-index] :or {:current-term 0 :commit-index 0}} @server-state
         pentry (get-entry log prev-log-index)
         eentry (get-entry log (inc prev-log-index))
         [lid lterm] (last-id-term log)
@@ -433,7 +511,7 @@
                               "server-state=%s, current-term=%s, "
                               "commit-index=%s, pentry=%s, eentry=%s, "
                               "lid=%s, lterm=%s")
-                         id @servers-config @server-state
+                         id servers-config @server-state
                          current-term commit-index
                          pentry eentry lid lterm)
         rc (cond
@@ -482,41 +560,47 @@
     :as this}
    rid command]
 
-  (let [{:keys [:commit-index :current-term :state :voted-for] :or {:commit-index 0 :current-term 0}} @server-state
-        state-machines (:state-machines @servers-config)
-        followers (seq (disj (apply clojure.set/union (:servers @servers-config)) id))
+  (let [{:keys [:commit-index :current-term :state :voted-for] :or
+         {:commit-index 0 :current-term 0}} @server-state
+        followers (seq (disj (apply clojure.set/union (:servers servers-config)) id))
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
         min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))]
-    (logger/tracef "rs-command!-1: id=%s command?=%s commit-index=%s, current-term=%s, state=%s, voted-for=%s, followers=%s"
+    (logger/tracef (str "rs-command!-1: id=%s, command?=%s, commit-index=%s, "
+                        "current-term=%s, state=%s, voted-for=%s, followers=%s")
                    id (some? command) commit-index current-term state voted-for followers)
     (cond
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
-                                new-id (if (nil? command) pidx (post-cmd! log current-term rid command))
-                                _ (and command (rs-process-log! this))
+                                new-id (if (nil? command) pidx
+                                           (post-cmd! log current-term rid command))
+                                {:keys [:applied?]} (process-set-config! this command)
                                 cmd (if (nil? command) []
                                         [{:id new-id :term current-term
                                           :rid rid :command command}])
-                                resp (if (seq? followers) (append-entries rpc
-                                                                          followers
-                                                                          (->Entry current-term id pidx pterm
-                                                                                   cmd
-                                                                                   commit-index))
+                                resp (if (seq? followers) (append-entries
+                                                           rpc
+                                                           followers
+                                                           (->Entry current-term id pidx pterm
+                                                                    cmd
+                                                                    commit-index))
                                          {})
                                 _ (logger/tracef "rs-command!-2: id=%s, append-entries resp=%s" id resp)
                                 num-success (count (filter :success (vals resp)))
-                                max-term (apply max (cons current-term (map :term (remove :success (vals resp)))))]
+                                max-term (apply max (cons current-term
+                                                          (map :term (remove :success (vals resp)))))]
                             (cond
-                              (< current-term max-term) (let [[sid _] (first (filter (fn [[s {:keys [:success :term]}]]
-                                                                                       (and (not success) (= term max-term)))
-                                                                                     resp))]
+                              (< current-term max-term) (let [[sid _]
+                                                              (first (filter
+                                                                      (fn [[s {:keys [:success :term]}]]
+                                                                        (and (not success) (= term max-term)))
+                                                                      resp))]
                                                           (follower! this)
                                                           {:status :moved :server sid})
                               (< num-success min-quorum) {:status :unavailable :server id}
                               :else (do
                                       (dosync (alter server-state assoc :commit-index new-id))
-                                      (and command (rs-process-log! this))
+                                      (when (and command (not applied?)) (process-command! this command))
                                       {:status :accepted :server id})))
                           (catch IllegalArgumentException iae
                             (logger/warnf iae "rs-command!: id=%s Exception: %s" id iae)
@@ -524,26 +608,36 @@
       :else {:status :moved :server voted-for})))
 
 
+(defn- rs-get-machine-state-helper
+  [processor servers-config server-state]
+  (let [{:keys [:state :voted-for]} @server-state
+        sm ((:state-processors servers-config) processor)]
+    (cond
+      (not= state :leader) [{:status :moved :server voted-for :state nil} nil]
+      (nil? sm) [{:status :not-found :server voted-for :state nil} nil]
+      :else [{:status :ok :server voted-for} sm])))
+
+
 (defn- rs-get-machine-state
   "Implementation of Raft protocol get-machine-state function for
   a RaftServer"
   ([{:keys [:server-state :servers-config]}
-    machine]
-   (let [[resp sm] (rs-get-state-machine machine
-                                         servers-config
-                                         server-state)]
+    processor]
+   (let [[resp sm] (rs-get-machine-state-helper processor
+                                                servers-config
+                                                server-state)]
      (if (= (:status resp) :ok)
        (assoc resp :state (get-state sm))
        resp)))
-  ([this machine resource-id]
-   (get-machine-state this machine resource-id nil))
-  ([{:keys [:server-state :servers-config]} machine resource-id default]
-   (let [[resp sm] (rs-get-state-machine machine
-                                         servers-config
-                                         server-state)]
-     (if (= (:status resp) :ok)
-       (assoc resp :state (get-state sm resource-id default))
-       resp))))
+  ([this processor resource-id]
+   (get-machine-state this processor resource-id nil))
+  ([{:keys [:server-state :servers-config]} processor resource-id default]
+   (let [[resp sm] (rs-get-machine-state-helper processor
+                                                servers-config
+                                                server-state)]
+   (if (= (:status resp) :ok)
+     (assoc resp :state (get-state sm resource-id default))
+     resp))))
 
 
 (defn- rs-install-snapshot
@@ -564,8 +658,7 @@
            :servers-config :server-state :leader-state]
     :as this}
    {:keys [:term :candidate-id :last-log-index :last-log-term]}]
-  (let [{:keys [:current-term :voted-for :last-leader-cmd-time] :or {:current-term 0 :last-leader-cmd-time 0}} @server-state
-        {:keys [:leader]} @servers-config
+  (let [{:keys [:current-term :leader :voted-for :last-leader-cmd-time] :or {:current-term 0 :last-leader-cmd-time 0}} @server-state
         {:keys [:election-timeout-min] :or {:election-timeout-min 0}} election-config
         [lid lterm] (last-id-term log)
         leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)
@@ -608,12 +701,12 @@
 ;;;
 ;;; id - the ID of this server [static]
 ;;; log - a Log implementation [static]
-;;; rpc - an RPC implementation that knows how to communicate will all servers (by their
-;;;       ID) in the union of all the server-sets in the servers vector.
-;;;       The RPC must implement the three-argument arity of all of the functions defined
-;;;       in the RaftProtocol
+;;; rpc - an RPC implementation that knows how to communicate will all servers
+;;;       (by their ID) in the union of all the server-sets in the servers vector.
+;;;       The RPC must implement the three-argument arity of all of the functions
+;;;       defined in the RaftProtocol
 ;;; election-config - a map with the following entries [static]
-;;;   :broadcast-timeout - time in ms for leader broadcast (if nil, no broadcasts are issued)
+;;;   :broadcast-timeout - time in ms for leader broadcast
 ;;;   :election-timeout-min - minimum time in ms for election timeout
 ;;;   :election-timeout-max - maximum time in ms for election timeout
 ;;; timers - a map (wrapped in a [ref]) whose keys are timer keywords and whose
@@ -623,34 +716,40 @@
 ;;;      :follower  (follower-state election timeout)
 ;;;      :candidate (candidate-state timeout)
 ;;;      :broadcast (leader-state send-broadcast timeout)
-;;; servers-config - a map with the following entries [ref]
+;;; servers-config - a map with the following entries
 ;;;   :servers - a vector that contains one or two sets of server-ids for all
 ;;;             servers in the Raft cluster.  if there is only one entry in the
 ;;;             servers vector that is the current config
 ;;;             If there are two entries in the servers vector, the first
 ;;;             entry is the current config and the second entry is the new
 ;;;             config that we are transitioning to
-;;;   :state-machines - a map whose keys are unique state-machine identifiers and whose
-;;;     values are state machine instances.
+;;;   :state-processors - a map whose keys are unique state-processor identifiers
+;;;     and whose values are state-processor instances.
+;;;   :state-change-listeners - a map whose keys are state-processor identifiers and
+;;;     whose corresponding values are state-changed callback functions that
+;;;     should be invoked when the state changes.
 ;;;   :leader - if not nil, using configured leader election protocol.  The value
 ;;;     should be the ID of ther server that is supposed to be the leader.
 ;;;
 ;;; server-state - a map that is persisted automatically as values are changed. [ref]
+;;;   :servers - initialized from servers-config.  After that the values here
+;;;     override what is in servers-config
+;;;   :leader - initialized from servers-config.  After that the value here
+;;;     override what is in servers-config
 ;;;   :state - :follower, :candidate, :leader
 ;;;   :current-term - latest term this server has seen.  initialized to 0 on first boot
 ;;;   :voted-for - candidate that received vote in current term (null if none)
 ;;;   :commit-index - index of highest log entry known to be committed.  Initialized
 ;;;     to 0, increases monotonically
-;;;   :last-applied - map
-;;;     keys = <state-machine-identifier>
-;;;     values = map whose key is the state machine command (e.g., :patch)
-;;;              and whose values are the highest log entry applied to the state
-;;;              machine for that command.  They start at 0 and increase
-;;;              monotonically. Restriction: Each state machine should operate
-;;;              on just one type of command.  Multiple state machines MAY process the
-;;;              same command.  That's OK, they will have different <state-machine-identifiers>
-;;;              When this is implemented, values are just integers that reflect the latest
-;;;              log entry that was processed by the state machine.
+;;;   :last-applied - index of highest log entry that has been applied.
+;;;   :last-applied-config - index of the highest :set-config log entry that has
+;;;     been applied. If the server is running with a config that it received at
+;;;     start-up and no changes to its :servers had been stored in its log, this
+;;;     will be 0.  When a server starts, it should scan its log starting from
+;;;     (inc (max :last-applied :last-applied-config)) to it's log's last-id-term.
+;;;     If there are any :set-config commands stored in the log, it should apply
+;;;     the most current :set-config found (if any) and update :last-applied-config
+;;;     accordingly.  TODO: Implement this behavior
 ;;;   :last-leader-cmd-time - system time in ms when last cmd received from leader.
 ;;;      See spec, section 6, last paragraph.
 ;;; leader-state - a map that is persisted automatically as values are changed.  used only
@@ -679,10 +778,20 @@
   rs-basicraft-election
   RaftProtocol
   rs-basicraft-raftprotocol
-  )
+  StateMachine
+  rsm-state-machine
+  StateChangedNotifier
+  rsm-state-changed-notifier)
 
 (actor-wrapper RaftServerActor [Election RaftProtocol] defrecord)
 
+(defn make-simple-raft-server
+  [id log rpc ec sc ss ls]
+  (RaftServer. id log rpc ec (ref {}) sc
+               (ref (assoc ss
+                           :leader (:leader sc)
+                           :servers (:servers sc)))
+               (ref ls)))
 
 (defn make-raft-server
   "Constructs a RaftServer instance that has been actor-fied.
@@ -696,44 +805,42 @@
        :election-timeout-max - maximum time in ms for election timeout
   "
   [id log rpc election-config servers-config server-state leader-state]
-  (->RaftServerActor (chan) (RaftServer.
+  (->RaftServerActor (chan) (make-simple-raft-server
                              id
                              log
                              rpc
                              election-config
-                             (ref {})
-                             (ref servers-config)
-                             (ref server-state)
-                             (ref leader-state))))
-(defn make-simple-raft-server
-  [id log rpc ec sc ss ls]
-  (RaftServer. id log rpc ec (ref {}) (ref sc) (ref ss) (ref ls)))
-
-;; (defmulti make-raft
-;;   (fn [cfg rpc] (:cluster-raft (:local cfg)))
-;;   :default :memory)
-
-;; (defmethod make-raft :memory [{:keys [:local] :as cfg} rpc]
-;;   (let [id (config/local-node-id cfg)
-;;         log (make-memory-log)]))
+                             servers-config
+                             server-state
+                             leader-state)))
 
 (defn make-raft-from-config
-  [{:keys [:id :log :election-config :leader-state
+  "Constructs a raft server from the provided configuration.
+  Parameters:
+  RAFT-CONFIG - Raft server configuration
+  "
+  [{:keys [:id :prefix :log :election-config :leader-state
            :rpc :servers-config :server-state]}]
-  (logger/debugf (str "make-raft-from-config: id=%s, log=%s, election-config=%s, "
+  (logger/tracef (str "make-raft-from-config: id=%s, prefix=%s, log=%s, election-config=%s, "
                       "leader-state=%s, rpc=%s, servers-config=%s, server-state=%s")
-                 id log election-config leader-state rpc servers-config server-state)
-  (let [log (apply (resolve (symbol (:fn log))) (:args log))
+                 id prefix log election-config leader-state rpc servers-config server-state)
+  (let [dirs-map (util/init-directories prefix id :config :state :snapshots)
+        log (apply (resolve (symbol (:fn log))) (cons dirs-map (:args log)))
         rpc (apply (resolve (symbol (:fn rpc))) (:args rpc))
-        machines (into {} (map
-                           (fn [[id {:keys [:fn :args]}]]
-                             [id (apply (resolve (symbol fn)) (map eval args))])
-                           (:state-machines servers-config)))]
+        processors (into {} (map
+                             (fn [[id {:keys [:fn :args]}]]
+                               [id (apply (resolve (symbol fn)) (cons dirs-map (map eval args)))])
+                             (:state-processors servers-config)))
+        listeners (into {} (map
+                            (fn [[id {:keys [:fn :args]}]]
+                              [id (apply (resolve (symbol fn)) (map eval args))])
+                            (:state-change-listeners servers-config)))]
     (RaftServer. id
                  log
                  rpc
                  election-config
                  (ref {})
-                 (ref (assoc servers-config :state-machines machines))
-                 (ref server-state)
+                 (merge (assoc servers-config :state-processors processors :state-change-listeners listeners)
+                        dirs-map)
+                 (ref (assoc server-state :leader (:leader servers-config) :servers (:servers servers-config)))
                  (ref leader-state))))

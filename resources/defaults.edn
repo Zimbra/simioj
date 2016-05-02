@@ -1,17 +1,10 @@
-{;;; Local node configuration
- :node {;; each node should have a unique identifier
+{:node {;; each node should have a unique identifier
         :id :n0
         ;; human-friendly name for the node
         :name "node0"
         ;; Inter-node communications
         :endpoint {;; HTTP address:port to bind to
                    :http "0.0.0.0:2283"}
-        ;; Default location for configuration
-        :config-dir "/opt/zimbra/simioj/conf"
-        ;; Default location for logs
-        :log-dir "/opt/zimbra/simioj/log"
-        ;; Default location for replicated log/cache data
-        :data-dir "/opt/zimbra/simioj/data"
         ;; Jetty configuration
         :worker {:count 4 :threads 4}
         ;; This location is added to the classpath and should contain
@@ -45,15 +38,38 @@
              ;; (2) we have quorum and quorum-timeout milliseconds have elapsed
              :quorum-timeout 30000}
  ;;; Configuration for the Raft that will be started by the API
- :raft {;; Raft log implementation (:sqlite, :memory)
-        :log {:type :sqlite :args {}}
-        ;; Initial server-config.  :servers is a vector that may contain
-        ;; 0, 1, or 2 sets of server IDs; e.g., [#{:s0 :s1 :s2}]
-        :server-config {:servers []}
-        ;; Initial server-state
+ :raft {;; ID of raft server.
+        :id :s0
+        ;; Base path for location where raft data is stored.
+        ;; The following subdirectories will be created
+        ;;   :prefix/<raft-id>/config
+        ;;   :prefix/<raft-id>/state
+        ;;   :prefix/<raft-id>/snapshots
+        :prefix "/opt/zimbra/simioj/data"
+        ;; Raft log initialization function / args
+        :log {:fn "" :args ()}
+        ;; Raft rpc initialization function / args
+        :rpc {:fn "" :args ()}
+        ;; Raft election config
+        :election-config {:broadcast-timeout 10 :election-timeout-min 150 :election-timeout-max 300}
+        ;; Initial servers-config.
+        ;; May contain the following entries
+        ;; :leader <leader-id> - If using leader affinity
+        ;; :servers is a vector that may contain
+        ;;   0 or 1 sets of server identifiers; e.g., [#{:s0 :s1 :s2}]
+        ;;   These are all the servers that are members of the Raft cluster
+        ;; :state-processers - a map of state-machine-processor initializers
+        ;; :state-change-listeners - a map of state-change-listener callback initializers
+        ;; The following initialized directory paths are injected into the :servers-config
+        ;; on start-up, based upon the :prefix and :id
+        ;; :config, :state, :snapshots
+        :servers-config {:servers []}
+        ;; Initial server-state.
+        ;; Notes: If a server has persisted state when it starts up, the
+        ;;          :server-state config is not used.
+        ;;        Upon startup, the following is injected into :server-state
+        ;;          from the initialization values provided in :severs-config
+        ;;          :leader
+        ;;          :servers
         :server-state {}
-        ;; Additional statemachines to be configured
-        ;; keys should be a keyword to use for an identifier
-        ;; values should be fully-qualified classes
-        :statemachines {}
         }}
