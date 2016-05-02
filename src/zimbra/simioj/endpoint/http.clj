@@ -92,9 +92,6 @@ POST <command> - Post a command to the Raft
 (defn state-handler
   "Retrieve state values"
   [ctx state-machine resource-id req]
-  (logger/infof "state-handler: state-machine=%s (%s), resource-id=%s (%s)"
-                state-machine (type state-machine)
-                resource-id (type resource-id))
   (let [raft (:raft @ctx)
         sm (keyword (clojure.string/replace state-machine #":" ""))
         resp (if (nil? resource-id)
@@ -113,11 +110,9 @@ POST <command> - Post a command to the Raft
   [ctx req]
   (let [raft (:raft @ctx)]
     (logger/tracef "status-handler: id=%s, servers-config=%s"
-                   (:id raft)
-                   (:servers-config raft))
+                   (:id raft))
     {:status 200
      :body {:id (:id raft)
-            :servers-config (assoc @(:servers-config raft) :state-machines (keys (:state-machines @(:servers-config raft))))
             :server-state @(:server-state raft)
             :leader-state @(:leader-state raft)}}))
 
