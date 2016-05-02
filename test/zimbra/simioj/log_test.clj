@@ -32,10 +32,13 @@
 
 (deftest memory-log-basic-test
   (testing "memory-log: basic tests"
-    (log-basic-test (make-memory-log))))
+    (log-basic-test (make-memory-log nil))))
 
 (deftest sqlite-log-basic-test
   (testing "sqlite-log: basic tests"
     (with-temp-file-path log-file ".dat"
       (with-cleanup-file-path log-file
-        (log-basic-test (make-sqlite-log log-file))))))
+        (let [path-parts (clojure.string/split log-file #"/")
+              dir-path (clojure.string/join "/" (butlast path-parts))
+              name (last path-parts)]
+          (log-basic-test (make-sqlite-log {:state dir-path} name)))))))

@@ -8,7 +8,7 @@
 
 (deftest single-server-test
   (testing "Basic commands sent to single server"
-    (let [log (make-memory-log)
+    (let [log (make-memory-log nil)
           s0 (make-simple-raft-server
               :s0 log nil {} ; id log rpc ec
               {:servers [#{:s0}]} ; sc
@@ -29,12 +29,12 @@
     (let [sm (ref {})
           rpc (->TestRpc sm)
           s0 (make-simple-raft-server
-              :s0 (make-memory-log) rpc {} ; id log rpc ec
+              :s0 (make-memory-log nil) rpc {} ; id log rpc ec
               {:servers [#{:s0 :s1}]} ; sc
               {:state :leader :current-term 1 :commit-index 0 :voted-for :s0} ; ss
               {}) ; ls
           s1 (make-simple-raft-server
-              :s1 (make-memory-log) rpc {}
+              :s1 (make-memory-log nil) rpc {}
               {:servers [#{:s0 :s1}]} ; sc
               {:state :follower :current-term 1 :commit-index 0 :voted-for :s0} ; ss
               {}) ; ls
@@ -53,12 +53,12 @@
     (let [sm (ref {})
           rpc (->TestRpc sm)
           s0 (make-simple-raft-server
-              :s0 (make-memory-log) rpc {} ; id log rpc ec
+              :s0 (make-memory-log nil) rpc {} ; id log rpc ec
               {:servers [#{:s0 :s1}]} ; sc
               {:state :leader :current-term 1 :commit-index 0 :voted-for :s0} ; ss
               {}) ; ls
           s1 (make-simple-raft-server
-              :s1 (make-memory-log) rpc {}
+              :s1 (make-memory-log nil) rpc {}
               {:servers [#{:s0 :s1}]} ; sc
               {:state :follower :current-term 2 :commit-index 0 :voted-for :s0} ; ss
               {}) ; ls
