@@ -7,6 +7,18 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Log Protocol
+;;;;
+;;;; Implementation Notes
+;;;;
+;;;; Any Log implementation must provide a function to construct an instance
+;;;; of that Log.  It is required that all such functions accept an first
+;;;; DIRS-MAP artument that is a map with the following entries.
+;;;;   {:config <config-dir-path>
+;;;;    :state <state-dir-path>
+;;;;    :snapshots <snapshots-dir-path>}
+;;;; These directories are guaranteed to pre-exist.  It is not required that
+;;;; the specific implmentation use this argument (see make-memory-log below).
+;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
@@ -145,8 +157,8 @@
 
 (defn make-memory-log
   "Create a MemoryLog instance.  This is for testing purposes."
-  ([] (make-memory-log []))
-  ([log] (->MemoryLog (ref log))))
+  ([_dirs-map] (make-memory-log _dirs-map []))
+  ([_dirs-map log] (->MemoryLog (ref log))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -186,9 +198,10 @@
 
 (defn make-persistent-log
   "Create a PersistentMemoryLog instance."
-  ([location & {:keys [data] :or {data []}}]
-   (->PersistentMemoryLog location (make-memory-log (util/load-obj-if-present
-                                                     location :default-val data)))))
+  ([dirs-map log-name & {:keys [data] :or {data []}}]
+   (let [location (.getAbsolutePath (io/file (:state dirs-map "") log-name))]
+     (->PersistentMemoryLog location (make-memory-log (util/load-obj-if-present
+                                                       location :default-val data))))))
 
 
 
@@ -266,8 +279,8 @@
 
 (defn- initialize-db
   "Creates the tables for the log file"
-  [db & {:keys [table initial_data] :or {table "log"
-                                         initial_data []}}]
+  [db & {:keys [:table :initial-data] :or {:table "log"
+                                           :initial-data []}}]
   (do
     (j/db-do-commands db
                       (j/create-table-ddl (str table)
@@ -276,16 +289,25 @@
                                           [:rid "text" :unique :not :null]
                                           [:command "text"]
                                           :table-spec "without rowid"))
-    (when (seq initial_data)
+    (when (seq initial-data)
       (j/with-db-transaction [c db]
-        (doall (map #(j/insert! db table %) initial_data))))))
+        (doall (map #(j/insert! db table %) initial-data))))))
 
 (defn make-sqlite-log
-  "Creates or loads an existing log"
-  [location & {:keys [table initial_data] :or {table "log" initial_data []}}]
-  (let [db-spec {:classname   "org.sqlite.JDBC"
+  "Creates or loads an existing log.
+  Parameters:
+  DIRS-MAP a map with the following entries.  Directories must exist.
+    {:config <config-dir-path> :state <state-dir-path> :snapshots <snapshots-dir-path>}
+  LOG-NAME the name of the SQLite database file
+  OPTIONAL map with the following:
+  :table - table to create
+  :initial-data - initial data
+  "
+  [dirs-map log-name & {:keys [:table :initial-data] :or {:table "log" :initial-data []}}]
+  (let [location (.getAbsolutePath (io/file (:state dirs-map "") log-name))
+        db-spec {:classname   "org.sqlite.JDBC"
                  :subprotocol "sqlite"
                  :subname location}]
     (when-not (.exists (io/file location))
-      (initialize-db db-spec :table table :initial_data initial_data))
+      (initialize-db db-spec :table table :initial-data initial-data))
     (->SQLiteLog db-spec table)))
