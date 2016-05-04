@@ -322,6 +322,13 @@
   broadcast-timeout)
 
 
+(defn- rs-follower-ids
+  "Computes the union of all of the sets in the :servers
+  vector in the SERVER-STATE ref.
+  Returns a seq"
+  [{:keys [:id :server-state]}]
+  (disj (apply clojure.set/union (:servers @server-state)) id))
+
 (defn- rs-election-timeout-ms
   "Computes a random election timeout between the minimum
   and maximum configuration settings."
@@ -392,8 +399,7 @@
   (logger/tracef "rs-candidate!: id=%s, server-state=%s" id @server-state)
   (let [leader (:leader @server-state)
         voted-for (:voted-for @server-state)
-        followers (disj (apply clojure.set/union
-                               (:servers servers-config)) id)
+        followers (rs-follower-ids this)
         followers? (pos? (count followers))]
     (let [new-term (inc (:current-term @server-state 0))]
       (dosync (alter server-state assoc
@@ -458,18 +464,21 @@
   ([{:keys [:id :log :rpc :election-config :timers
             :servers-config :server-state :leader-state]
      :as this} new-term]
-   ;;(cancel-timers! this)
-   (logger/tracef "rs-leader!/2: id=%s, new-term=%s, server-state=%s, leader-state=%s"
-                  id new-term @server-state @leader-state)
-   (dosync (alter server-state assoc
-                  :current-term new-term
-                  :state :leader
-                  :voted-for id))
-   (let [resp (command! this (generate-rid) nil)]
-     (logger/tracef "rs-leader!/2: id=%s, resp=%s" id resp)
-     (if (= (:status resp) :accepted)
-       (start-timers! this)
-       (follower! this)))))
+   (let [[lid lterm] (last-id-term log)]
+     (logger/tracef "rs-leader!/2: id=%s, new-term=%s, server-state=%s, leader-state=%s"
+                    id new-term @server-state @leader-state)
+     (dosync (alter server-state assoc
+                    :current-term new-term
+                    :state :leader
+                    :voted-for id)
+             (ref-set leader-state
+                      (into {} (map (fn [sid] [sid {:next-index (inc lid) :match-index 0 :updater nil}])
+                                    (rs-follower-ids this)))))
+     (let [resp (command! this (generate-rid) nil)]
+       (logger/tracef "rs-leader!/2: id=%s, resp=%s" id resp)
+       (if (= (:status resp) :accepted)
+         (start-timers! this)
+         (follower! this))))))
 
 
 (def rs-basicraft-election
@@ -562,7 +571,7 @@
 
   (let [{:keys [:commit-index :current-term :state :voted-for] :or
          {:commit-index 0 :current-term 0}} @server-state
-        followers (seq (disj (apply clojure.set/union (:servers @server-state)) id))
+        followers (rs-follower-ids this)
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
         min-quorum (quot (inc (count followers)) 2)]
@@ -759,12 +768,17 @@
 ;;;     if state = :leader [ref]
 ;;;   keys: <server-ids>
 ;;;   values: {
-;;;     next-index <int>
-;;;     match-index <int>
+;;;     :next-index <int>
+;;;     :match-index <int>
+;;;     :updater <future>
 ;;;   }
-;;;   next-index is the index of the next log entry to send to that server
+;;;   next-index is the index of the next log entry to send to that server. It is
+;;;     initialized to the leaders's max log id + 1.
 ;;;   match-index is the index of the highest log entry known to be
-;;;     replicated to that server.
+;;;     replicated to that server. It is initialized to 0 when a server becomes
+;;;     leader.
+;;;   updater - If as follower is behind, the leader will create an updater thread
+;;;     that is responsible for bringing the follower up-to-date.
 
 (defrecord RaftServer [id                ; server-id
                        log               ; Log instance
