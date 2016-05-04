@@ -562,13 +562,16 @@
 
   (let [{:keys [:commit-index :current-term :state :voted-for] :or
          {:commit-index 0 :current-term 0}} @server-state
-        followers (seq (disj (apply clojure.set/union (:servers servers-config)) id))
+        followers (seq (disj (apply clojure.set/union (:servers @server-state)) id))
         ;; we implicitly include ourself in the quorum, so this is just the remaining
         ;; quorum we need to commit a log entry
-        min-quorum (if (zero? (count followers)) 0 (quot (count followers) 2))]
+        min-quorum (quot (inc (count followers)) 2)]
+
     (logger/tracef (str "rs-command!-1: id=%s, command?=%s, commit-index=%s, "
-                        "current-term=%s, state=%s, voted-for=%s, followers=%s")
-                   id (some? command) commit-index current-term state voted-for followers)
+                        "current-term=%s, state=%s, voted-for=%s, min-quorum=%s, "
+                        "followers=%s")
+                   id (some? command) commit-index current-term
+                   state voted-for min-quorum followers)
     (cond
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
