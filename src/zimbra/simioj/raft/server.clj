@@ -16,11 +16,15 @@
 ;;;; Raft protocol definition
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(def MAX-ENTRIES-DEF
+  "Default value of :max-entries if not specified in :servers-config"
+  5)
+
 (defrecord Entry [^Number term            ; leader's term
                   leader-id               ; leader's ID so followers can redirect
                   ^Number prev-log-index  ; idx of log entry immediatly preceeding
                   ^Number prev-log-term   ; term of prev-log-index entry
-                  entries                 ; entries to store (empty for heartbeat)
+                  entries                 ; entries (commands) to store (empty for heartbeat)
                   ^Number leader-commit]) ; leader's commit-index
 
 (defrecord Vote [^Number term             ; candidate's term
@@ -742,7 +746,9 @@
 ;;;     should be invoked when the state changes.
 ;;;   :leader - if not nil, using configured leader election protocol.  The value
 ;;;     should be the ID of ther server that is supposed to be the leader.
-;;;
+;;;   :max-entries (integer) - the maximum number of entries (commands) to include
+;;;     in a single append-entries RPC.  If not specified the value of
+;;;     MAX-ENTRIES-DEF will be used.
 ;;; server-state - a map that is persisted automatically as values are changed. [ref]
 ;;;   :servers - initialized from servers-config.  After that the values here
 ;;;     override what is in servers-config

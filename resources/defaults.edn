@@ -60,9 +60,8 @@
         ;;   These are all the servers that are members of the Raft cluster
         ;; :state-processers - a map of state-machine-processor initializers
         ;; :state-change-listeners - a map of state-change-listener callback initializers
-        ;; The following initialized directory paths are injected into the :servers-config
-        ;; on start-up, based upon the :prefix and :id
-        ;; :config, :state, :snapshots
+        ;; :max-entries - (integer) max number of entries (commands) to include in a
+        ;;   single append-entries RPC call.
         :servers-config {:servers []}
         ;; Initial server-state.
         ;; Notes: If a server has persisted state when it starts up, the
