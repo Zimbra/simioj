@@ -62,6 +62,8 @@
         ;; :state-change-listeners - a map of state-change-listener callback initializers
         ;; :max-entries - (integer) max number of entries (commands) to include in a
         ;;   single append-entries RPC call.
+        ;; :down-follower-retry (integer, milliseconds) amount of time to wait before
+        ;;   attempting to contact a follower that was down.
         :servers-config {:servers []}
         ;; Initial server-state.
         ;; Notes: If a server has persisted state when it starts up, the
