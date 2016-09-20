@@ -1,7 +1,7 @@
 {:node {:id :n2
         :name "node2"
         :endpoint {:http "0.0.0.0:2282"}}
- :raft {:id :s0
+ :raft {:id :s2
         :prefix "test-data"
         :log {:fn "zimbra.simioj.raft.log/make-memory-log" :args ()}
         :rpc {:fn "zimbra.simioj.endpoint.http/make-http-rpc"
@@ -9,7 +9,7 @@
                                 :s1 {:endpoint {:http "127.0.0.1:2281"}}
                                 :s2 {:endpoint {:http "127.0.0.1:2282"}}}})}
         :election-config {:broadcast-timeout 100 :election-timeout-min 1000 :election-timeout-max 5000}
-        :servers-config {:leader :s2
+        :servers-config {:leader :s0
                          :servers [#{:s0 :s1 :s2}]
                          :state-processors {:kv {:fn "zimbra.simioj.raft.statemachine/make-memory-state-processor"
                                                  :args (:patch (ref {}))}}}
