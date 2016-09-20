@@ -113,6 +113,7 @@ POST <command> - Post a command to the Raft
                    (:id raft))
     {:status 200
      :body {:id (:id raft)
+            :election-config (:election-config raft)
             :server-state @(:server-state raft)
             :leader-state @(:leader-state raft)}}))
 
@@ -123,7 +124,7 @@ POST <command> - Post a command to the Raft
   (let [raft (:raft @ctx)
         new-leader (keyword (clojure.string/replace id #":" ""))]
     (dosync
-     (alter (:servers-config raft) assoc :leader new-leader)))
+     (alter (:server-state raft) assoc :leader new-leader)))
   (status-handler ctx req))
 
 
@@ -183,8 +184,8 @@ POST <command> - Post a command to the Raft
                              :accept "application/edn"
                              :body (pr-str message)
                              :as :clojure}))
-    (catch java.net.ConnectException e
-      (logger/error "post-message: exception %s" (.getMessage e))
+    (catch Exception e
+      (logger/tracef "post-message: exception %s" (.getMessage e))
       {:status 503 :content-type "application/edn" :body message})))
 
 
@@ -192,32 +193,30 @@ POST <command> - Post a command to the Raft
 ;;;          {<id0> <ip:port>, ...}
 (defrecord HttpRpc [servers]
   RaftProtocol
-  ;; TODO - filter nil responses
   (append-entries [this server-ids entries]
     (let [body (into {} entries)
           path "raft/append-entries"]
       (logger/tracef "httprpc/append-entries: server-ids=%s, body=%s" server-ids body)
-      (apply merge (pmap
-                    (fn [s]
-                      (let [resp (post-edn (@servers s) path body)]
-                        (logger/tracef "httprpc/append-entries: resp=%s (%s)" resp (type resp))
-                        {s (condp = (:status resp)
-                             202 (:body resp)
-                             nil)}))
-                    server-ids))))
+      (into {} (filter second (pmap
+                               (fn [s]
+                                 (let [resp (post-edn (@servers s) path body)]
+                                   (logger/tracef "httprpc/append-entries: resp=%s (%s)" resp (type resp))
+                                   [s (condp = (:status resp)
+                                        202 (:body resp)
+                                        nil)]))
+                               server-ids)))))
 
   (request-vote [this server-ids vote]
-    ;; TODO - filter nil responses
     (let [body (into {} vote)
           path "raft/request-vote"
-          resp (apply merge (pmap
-                             (fn [s]
-                               (let [resp (post-edn (@servers s) path body)]
-                                 (logger/tracef "httprpc/request-vote: resp=%s (%s)" resp (type resp))
-                                 {s (condp = (:status resp)
-                                      200 (:body resp)
-                                      nil)}))
-                             server-ids))]
+          resp (into {} (filter second (pmap
+                                        (fn [s]
+                                          (let [resp (post-edn (@servers s) path body)]
+                                            (logger/tracef "httprpc/request-vote: resp=%s (%s)" resp (type resp))
+                                            [s (condp = (:status resp)
+                                                 200 (:body resp)
+                                                 nil)]))
+                                        server-ids)))]
       (logger/tracef "httprpc/request-vote: server-ids=%s, vote=%s, @servers=%s, resp=%s"
                      server-ids vote @servers resp)
       resp))
