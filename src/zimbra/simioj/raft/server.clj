@@ -376,7 +376,7 @@
                                                (catch InterruptedException ie
                                                  (logger/tracef "follower election timeout exception: id=%s, ex=%s" id ie))
                                                (catch Exception e
-                                                 (logger/warnf e "follower election exception: id=%s, ex=%s" id e))))]
+                                                 (logger/errorf "follower election exception: id=%s, ex=%s" id e))))]
                   (dosync
                    (ref-set timers {:follower follower-timer})))
       :candidate (let [candidate-timer (future (Thread/sleep (rs-election-timeout-ms election-config))
@@ -385,7 +385,7 @@
                                                (catch InterruptedException ie
                                                  (logger/tracef "candidate election timeout exception: id=%s, ex=%s" id ie))
                                                  (catch Exception e
-                                                   (logger/warnf e "candidate election exception: id=%s, ex=%s" id e))))]
+                                                   (logger/errorf "candidate election exception: id=%s, ex=%s" id e))))]
                    (dosync (ref-set timers {:candidate candidate-timer})))
       :leader (let [leader-timer (future (Thread/sleep (rs-broadcast-timeout-ms election-config))
                                          (try
@@ -393,7 +393,7 @@
                                            (catch InterruptedException ie
                                              (logger/tracef "leader broadcast timeout exception: id=%s, ex=%s" id ie))
                                            (catch Exception e
-                                             (logger/warnf e "leader broadcast exception: id=%s, ex=%s" id e))))]
+                                             (logger/errorf "leader broadcast exception: id=%s, ex=%s" id e))))]
                 (dosync (ref-set timers {:leader leader-timer})))
       nil)))
 
@@ -417,7 +417,6 @@
   "
   [{:keys [:election-config :id :leader-state :log :rpc :server-state :servers-config :timers]
     :as this}]
-  ;; (cancel-timers! this)
   (logger/tracef "rs-candidate!: id=%s, server-state=%s" id @server-state)
   (let [leader (:leader @server-state)
         voted-for (:voted-for @server-state)
@@ -433,16 +432,17 @@
             resp (request-vote rpc
                                followers
                                (->Vote new-term id lid lterm))
-            _ (logger/debugf "rs-candidate! id=%s, request-vote-resp=%s" id resp)
+            _ (logger/tracef "rs-candidate! id=%s, request-vote-resp=%s" id resp)
             num-success (if followers? (count (filter :vote-granted (vals resp))) 0)
-            max-term (if followers? (apply max (map :term (vals resp))) 0)]
+            max-term (if followers? (apply max (cons 0 (map :term (vals resp)))) 0)]
         (logger/tracef "rs-candidate!: id=%s, new-term=%s, lid=%s, lterm=%s, num-succes=%s, max-term=%s, resp=%s"
                        id new-term lid lterm num-success max-term resp)
         (if (< num-success min-quorum)
           (do
-            (when (> max-term new-term)
-              (dosync (alter server-state assoc :current-term max-term)))
-            (follower! this))
+            (dosync (alter server-state assoc
+                           :state :follower
+                           :current-term max-term))
+            (start-timers! this))
           (leader! this new-term))))))
 
 (defn- rs-follower!
@@ -474,7 +474,6 @@
   ([{:keys [:id :log :rpc :election-config :timers
             :servers-config :server-state :leader-state]
      :as this}]
-   ;;(cancel-timers! this)
    (logger/tracef "rs-leader!/1: id=%s, server-state=%s, leader-state=%s"
                   id @server-state @leader-state)
    (let [[lid lterm] (last-id-term log)
@@ -498,10 +497,9 @@
                                     (rs-follower-ids this)))))
      (let [resp (command! this (generate-rid) nil)]
        (logger/tracef "rs-leader!/2: id=%s, resp=%s" id resp)
-       (if (= (:status resp) :accepted)
-         (start-timers! this)
-         (follower! this))))))
-
+       (when (not= (:status resp) :accepted)
+         (dosync (alter server-state assoc :state :follower)))
+       (start-timers! this)))))
 
 (def rs-basicraft-election
   "Mapping of Election protocol implementation functions
@@ -690,7 +688,9 @@
           (if (= new-state :leader)
             (dosync (alter leader-state
                            assoc-in [follower-id :updater] nil))
-            (follower! this))
+            (do
+              (dosync (alter server-state assoc :state :follower))
+              (start-timers! this)))
           (recur (inc (first (last-id-term log)))
                  (follower-id @leader-state {})))))))
 
@@ -756,7 +756,7 @@
       (= state :leader) (try
                           (let [[pidx pterm] (last-id-term log)
                                 new-id (if (nil? command) pidx
-                                           (post-cmd! log current-term rid command)) ;; TODO-GOT
+                                           (post-cmd! log current-term rid command))
                                 {:keys [:applied?]} (process-set-config! this command)
                                 cmd (if (nil? command) []
                                         [{:id new-id :term current-term
@@ -778,36 +778,40 @@
                                                                       (fn [[s {:keys [:success :term]}]]
                                                                         (and (not success) (= term max-term)))
                                                                       resp))]
-                                                          (follower! this)
+                                                          (dosync (alter server-state assoc :state :follower))
+                                                          (start-timers! this)
                                                           {:status :moved :server sid})
                               (< num-success min-quorum) {:status :unavailable :server id}
                               :else (do
                                       (rs-process-append-entries! this new-id resp)
-                                      ;;(dosync (alter server-state assoc :commit-index new-id))
-                                      (when (and command (not applied?)) (process-command! this command))
+                                      (when (and command (not applied?))
+                                        (when (:applied? (process-command! this command))
+                                          (dosync (alter server-state assoc :last-applied new-id))))
                                       {:status :accepted :server id})))
                           (catch IllegalArgumentException iae
                             (logger/warnf iae "rs-command!: id=%s Exception: %s" id iae)
                             {:status :conflict :server id}))
+      (= state :candidate) {:status :unavailable :server id}
       :else {:status :moved :server voted-for})))
 
 
 (defn- rs-get-machine-state-helper
-  [processor servers-config server-state]
+  [processor id servers-config server-state]
   (let [{:keys [:state :voted-for]} @server-state
         sm ((:state-processors servers-config) processor)]
     (cond
       (not= state :leader) [{:status :moved :server voted-for :state nil} nil]
-      (nil? sm) [{:status :not-found :server voted-for :state nil} nil]
-      :else [{:status :ok :server voted-for} sm])))
+      (nil? sm) [{:status :not-found :server id :state nil} nil]
+      :else [{:status :ok :server id} sm])))
 
 
 (defn- rs-get-machine-state
   "Implementation of Raft protocol get-machine-state function for
   a RaftServer"
-  ([{:keys [:server-state :servers-config]}
+  ([{:keys [:id :server-state :servers-config]}
     processor]
    (let [[resp sm] (rs-get-machine-state-helper processor
+                                                id
                                                 servers-config
                                                 server-state)]
      (if (= (:status resp) :ok)
@@ -815,8 +819,9 @@
        resp)))
   ([this processor resource-id]
    (get-machine-state this processor resource-id nil))
-  ([{:keys [:server-state :servers-config]} processor resource-id default]
+  ([{:keys [:id :server-state :servers-config]} processor resource-id default]
    (let [[resp sm] (rs-get-machine-state-helper processor
+                                                id
                                                 servers-config
                                                 server-state)]
    (if (= (:status resp) :ok)
@@ -846,7 +851,7 @@
         {:keys [:election-timeout-min] :or {:election-timeout-min 0}} election-config
         [lid lterm] (last-id-term log)
         leader-cmd-time-elapsed (- (system-time-ms) last-leader-cmd-time)
-        _ (logger/debugf (str
+        _ (logger/tracef (str
                           "rs-request-vote: id=%s, term=%s, candidate-id=%s, "
                           "last-log-index=%s, last-log-term=%s, current-term=%s, "
                           "last-leader-cmd-time=%s, voted-for=%s, lid=%s, lterm=%s, "
@@ -931,14 +936,6 @@
 ;;;   :commit-index - index of highest log entry known to be committed.  Initialized
 ;;;     to 0, increases monotonically
 ;;;   :last-applied - index of highest log entry that has been applied.
-;;;   :last-applied-config - index of the highest :set-config log entry that has
-;;;     been applied. If the server is running with a config that it received at
-;;;     start-up and no changes to its :servers had been stored in its log, this
-;;;     will be 0.  When a server starts, it should scan its log starting from
-;;;     (inc (max :last-applied :last-applied-config)) to it's log's last-id-term.
-;;;     If there are any :set-config commands stored in the log, it should apply
-;;;     the most current :set-config found (if any) and update :last-applied-config
-;;;     accordingly.  TODO: Implement this behavior
 ;;;   :last-leader-cmd-time - system time in ms when last cmd received from leader.
 ;;;      See spec, section 6, last paragraph.
 ;;; leader-state - a map that is persisted automatically as values are changed.  used only
@@ -962,7 +959,7 @@
                        rpc               ; RPC instance
                        election-config   ; map
                        timers            ; map (ref)
-                       servers-config    ; map (ref)
+                       servers-config    ; map
                        server-state      ; map (ref)
                        leader-state])    ; map (ref)
 
