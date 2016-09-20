@@ -9,7 +9,6 @@
 
 
 (defn- ^:no-doc build-config [options]
-  (logging/debugf "build-config: options=%s" options)
   (let [config-base (if (:replace-config options)
                       (apply config/load-cfg-files! (clojure.string/split
                                                      (:replace-config options) #","))
@@ -55,6 +54,7 @@
   "Handles the 'start' command"
   [options]
   (let [config (build-config options)
+        _ (logging/debugf "start: config=\n%s" (with-out-str (clojure.pprint/pprint config)))
         raft (make-raft-from-config (:raft config))
         ctx (ref {:config config
                   :raft raft})]
