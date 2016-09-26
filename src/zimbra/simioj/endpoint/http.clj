@@ -150,8 +150,11 @@ POST <command> - Post a command to the Raft
    (wrap-response
    (routes
     (app-routes ctx)))
-   :access-control-allow-origin [#".*"]
-   :access-control-allow-methods [:get :post]))
+   :access-control-allow-origin
+   (map re-pattern
+        (get-in @ctx [:config :node :endpoint :access-control-allow-origin] ".*"))
+   :access-control-allow-methods
+   (get-in @ctx [:config :node :endpoint :access-control-allow-methods] [:get :post])))
 
 
 (defn start!
