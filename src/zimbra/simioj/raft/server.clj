@@ -450,7 +450,6 @@
   for a RaftServer"
   [{:keys [:election-config :id :log :timers :servers-config :server-state]
     :as this}]
-  (cancel-timers! this)
   (let [leader (:leader @server-state)]
     (logger/tracef "rs-follower!: id=%s, leader=%s, server-state=%s, last-id-term=%s"
                    id leader @server-state (last-id-term log))
@@ -778,8 +777,6 @@
                                                                       (fn [[s {:keys [:success :term]}]]
                                                                         (and (not success) (= term max-term)))
                                                                       resp))]
-                                                          (dosync (alter server-state assoc :state :follower))
-                                                          (start-timers! this)
                                                           {:status :moved :server sid})
                               (< num-success min-quorum) {:status :unavailable :server id}
                               :else (do
