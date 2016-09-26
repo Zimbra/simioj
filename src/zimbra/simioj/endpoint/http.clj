@@ -6,6 +6,7 @@
    [compojure.core :refer :all]
    [ring.adapter.jetty :refer [run-jetty]]
    [ring.util.request :refer :all]
+   [ring.middleware.cors :refer [wrap-cors]]
    [zimbra.simioj.endpoint.middleware :refer :all]
    [zimbra.simioj.raft.server :refer :all])
   (:gen-class))
@@ -145,9 +146,12 @@ POST <command> - Post a command to the Raft
 (defn- endpoint-app
   "Wraps the provided routes with json or edn filtering"
   [ctx]
-  (wrap-response
+  (wrap-cors
+   (wrap-response
    (routes
-    (app-routes ctx))))
+    (app-routes ctx)))
+   :access-control-allow-origin [#".*"]
+   :access-control-allow-methods [:get :post]))
 
 
 (defn start!

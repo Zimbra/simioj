@@ -19,7 +19,8 @@
                  [org.clojure/core.async "0.2.374"]
                  ;; the following two entries are to support sqlite
                  [org.clojure/java.jdbc "0.3.7"]
-                 [org.xerial/sqlite-jdbc "3.8.9"]]
+                 [org.xerial/sqlite-jdbc "3.8.9"]
+                 [ring-cors "0.1.8"]]
   :main ^:skip-aot zimbra.simioj.main
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}
