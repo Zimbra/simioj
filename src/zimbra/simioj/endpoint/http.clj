@@ -101,7 +101,7 @@ POST <command> - Post a command to the Raft
         ret {:status status :body (:state resp)}
         rpc (:rpc raft)]
     (if (contains? #{301 302} status)
-      (assoc ret :headers {"Location" (format "http://%s/state/%s/%s" (@(:servers rpc) (:server resp)) state-machine resource-id)})
+      (assoc ret :headers {"Location" (format "http://%s/state/%s/%s" (@(:servers rpc) (:server resp)) state-machine (if (not resource-id) "" resource-id))})
       ret)))
 
 
