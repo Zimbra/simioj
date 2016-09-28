@@ -4,7 +4,11 @@
         :name "node0"
         ;; Inter-node communications
         :endpoint {;; HTTP address:port to bind to
-                   :http "0.0.0.0:2283"}
+                   :http "0.0.0.0:2283"
+                   ;; CORS
+                   :access-control-allow-origin [".*"]
+                   :access-control-allow-methods [:get :post]
+                   }
         ;; Jetty configuration
         :worker {:count 4 :threads 4}
         ;; This location is added to the classpath and should contain
